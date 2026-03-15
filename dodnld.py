@@ -439,68 +439,61 @@ def get_jw_video_blob_info(page) -> dict | None:
 
 
 def try_click_player(page) -> bool:
-    """Click video or play button to start playback (after ads are gone). Returns True if clicked."""
+    """Click video or play/center in any player iframe — same logic for VOE, ST, TV, FST."""
     try:
-        # Same strategy as headless: find player iframe by selector, then click inside (video / body / center)
         try:
-            page.wait_for_selector("iframe[src*='supremejav'], iframe[src^='http']", timeout=3000)
+            page.wait_for_selector("iframe[src*='supremejav'], iframe[src*='doppio'], iframe[src^='http']", timeout=3000)
         except Exception:
             pass
-        iframe_el = page.query_selector("iframe[src*='supremejav']") or page.query_selector("iframe[src^='http']")
-        if iframe_el:
-            frame = iframe_el.content_frame()
-            if frame:
-                try:
-                    frame.locator("video").first.click(force=True, timeout=2000)
-                    return True
-                except Exception:
-                    pass
-                try:
-                    frame.locator("body").first.click(force=True, timeout=2000)
-                    return True
-                except Exception:
-                    pass
-                try:
-                    box = iframe_el.bounding_box()
-                    if box and box.get("width") and box.get("height"):
-                        cx = box["x"] + box["width"] / 2
-                        cy = box["y"] + box["height"] / 2
-                        page.mouse.click(cx, cy)
-                        return True
-                except Exception:
-                    pass
-    except Exception:
-        pass
-    try:
-        # Main page: video element or Play button
-        for loc in [
-            page.locator("video").first,
-            page.get_by_role("button", name=re.compile(r"Play", re.I)).first,
-            page.locator("[class*='play'], [class*='jwplay'], [aria-label*='lay']").first,
-        ]:
+        # 1) <video> in any frame
+        for frame in page.frames:
             try:
-                if loc.is_visible(timeout=300):
-                    loc.click(force=True, timeout=500)
+                video = frame.locator("video").first
+                if video.is_visible(timeout=1500):
+                    video.click(force=True, timeout=1500)
                     return True
             except Exception:
                 pass
-        # Inside player iframe
+        try:
+            video = page.locator("video").first
+            if video.is_visible(timeout=500):
+                video.click(force=True, timeout=500)
+                return True
+        except Exception:
+            pass
+        # 2) In every iframe (like VOE): try play button, then body, then center of iframe
         for frame in page.frames:
             if frame == page.main_frame:
                 continue
             try:
-                for loc in [
-                    frame.locator("video").first,
-                    frame.locator("body").first,
-                ]:
+                for sel in ["[class*='play'][class*='button']", "[class*='big-play']", "[aria-label*='lay']", "button", "body"]:
                     try:
-                        if loc.is_visible(timeout=200):
-                            loc.click(force=True, timeout=400)
+                        el = frame.locator(sel).first
+                        if el.is_visible(timeout=600):
+                            el.click(force=True, timeout=600)
                             return True
                     except Exception:
                         pass
             except Exception:
                 pass
+        # 3) Center of any large iframe (player-sized; same as VOE)
+        try:
+            for iframe_el in page.query_selector_all("iframe"):
+                try:
+                    frame = iframe_el.content_frame()
+                    if not frame:
+                        continue
+                    box = iframe_el.bounding_box()
+                    if not box or box.get("width", 0) < 200 or box.get("height", 0) < 150:
+                        continue
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    page.mouse.click(cx, cy)
+                    return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
     except Exception:
         pass
     return False
@@ -960,9 +953,9 @@ def run_visual_mode(
     page_url: str,
     auto_download: bool = True,
     output_filename: str = "video.m4v",
+    server_tab: str = "VOE",
 ) -> None:
-    """Open page in visible browser, log stream-related requests. User clicks VOE manually; link opens in same tab.
-    After overlays are closed: auto-clicks player until target link appears; if auto_download, starts download automatically."""
+    """Open page in visible browser; click server_tab (VOE, ST, etc.) then dismiss ads. Same logic for any tab."""
     if DOWNLOAD_DIR.exists():
         try:
             shutil.rmtree(DOWNLOAD_DIR)
@@ -1166,17 +1159,18 @@ def run_visual_mode(
             }""")
             timeline("remove_target_blank_done")
             page.wait_for_timeout(500)
-            log("voe_click_start — only a.btn-server or SERVER block (avoid ad links)")
+            log(f"server_tab_click_start ({server_tab}) — only a.btn-server or SERVER block (avoid ad links)")
             tab_clicked = False
+            _tab_label_esc = re.escape(server_tab)
             try:
                 try:
                     page.wait_for_selector('text=SERVER', timeout=8000)
                 except Exception:
                     pass
                 page.wait_for_timeout(500)
-                # Only click a.btn-server with exact text VOE (never get_by_text/link — can hit ad overlay)
+                # Only click a.btn-server with exact text (VOE, ST, etc.) — never get_by_text/link (can hit ad overlay)
                 try:
-                    btn = page.locator("a.btn-server").filter(has_text=re.compile(r"^VOE$")).first
+                    btn = page.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
                     if btn.is_visible(timeout=3000):
                         btn.scroll_into_view_if_needed()
                         page.wait_for_timeout(200)
@@ -1187,7 +1181,7 @@ def run_visual_mode(
                 if not tab_clicked:
                     for frame in page.frames:
                         try:
-                            btn = frame.locator("a.btn-server").filter(has_text=re.compile(r"^VOE$")).first
+                            btn = frame.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
                             if btn.is_visible(timeout=2000):
                                 btn.scroll_into_view_if_needed()
                                 page.wait_for_timeout(200)
@@ -1197,56 +1191,57 @@ def run_visual_mode(
                         except Exception:
                             pass
                 if not tab_clicked:
-                    # Fallback: click VOE only inside SERVER block (JS filters ad hrefs)
-                    _click_voe_js = """() => {
+                    # Fallback: click tab only inside SERVER block (JS filters ad hrefs)
+                    _click_tab_js = f"""() => {{
+                        var label = '{server_tab.replace(chr(39), chr(92)+chr(39))}';
                         var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com/i;
                         var btns = document.querySelectorAll('a.btn-server');
-                        for (var i = 0; i < btns.length; i++) {
+                        for (var i = 0; i < btns.length; i++) {{
                             var a = btns[i];
-                            if ((a.textContent || a.innerText || '').trim() !== 'VOE') continue;
+                            if ((a.textContent || a.innerText || '').trim() !== label) continue;
                             var h = (a.getAttribute('href') || '').trim();
                             if (adLike.test(h)) continue;
-                            a.scrollIntoView({ block: 'center' });
+                            a.scrollIntoView({{ block: 'center' }});
                             a.click();
                             return true;
-                        }
+                        }}
                         var server = null;
-                        document.querySelectorAll('*').forEach(function(el) {
+                        document.querySelectorAll('*').forEach(function(el) {{
                             if (server) return;
                             var t = (el.innerText || '').trim();
-                            if (t.indexOf('SERVER') >= 0 && t.indexOf('VOE') >= 0 && t.length < 150) {
+                            if (t.indexOf('SERVER') >= 0 && t.indexOf(label) >= 0 && t.length < 150) {{
                                 var links = el.querySelectorAll('a.btn-server');
-                                for (var j = 0; j < links.length; j++) {
+                                for (var j = 0; j < links.length; j++) {{
                                     var a = links[j];
-                                    if ((a.textContent || '').trim() !== 'VOE') continue;
+                                    if ((a.textContent || '').trim() !== label) continue;
                                     if (adLike.test((a.getAttribute('href') || ''))) continue;
-                                    a.scrollIntoView({ block: 'center' });
+                                    a.scrollIntoView({{ block: 'center' }});
                                     a.click();
                                     server = true;
                                     return true;
-                                }
-                            }
-                        });
+                                }}
+                            }}
+                        }});
                         return !!server;
-                    }"""
-                    tab_clicked = page.evaluate(_click_voe_js)
+                    }}"""
+                    tab_clicked = page.evaluate(_click_tab_js)
                     if not tab_clicked:
                         for frame in page.frames:
                             if frame == page.main_frame:
                                 continue
                             try:
-                                if frame.evaluate(_click_voe_js):
+                                if frame.evaluate(_click_tab_js):
                                     tab_clicked = True
                                     break
                             except Exception:
                                 pass
                 if tab_clicked:
-                    timeline("voe_tab_clicked")
+                    timeline(f"server_tab_clicked_{server_tab}")
                     page.wait_for_timeout(3000)
                 else:
-                    log("voe_tab_not_visible")
+                    log(f"server_tab_not_visible ({server_tab})")
             except Exception as e:
-                log(f"voe_click_error {e!r}")
+                log(f"server_tab_click_error {e!r}")
             dismiss_ad_overlays(page)
             page.wait_for_timeout(500)
             timeline("dismiss_ad_overlays_done")
@@ -1265,7 +1260,7 @@ def run_visual_mode(
                 page.wait_for_timeout(800)
                 add_download_button_to_main_frame()
             except Exception as ex:
-                log(f"download_button_attach_error (after VOE) {ex!r}")
+                log(f"download_button_attach_error (after tab) {ex!r}")
             stop_event = threading.Event()
 
             def wait_enter():
@@ -1464,7 +1459,7 @@ def run_visual_mode(
                     on_player_page = current_url != page_url
                     if not on_player_page:
                         try:
-                            if page.query_selector("iframe[src*='supremejav'], iframe[src*='dianaavoidthey'], iframe[src*='turbovid']"):
+                            if page.query_selector("iframe[src*='supremejav'], iframe[src*='dianaavoidthey'], iframe[src*='turbovid'], iframe[src*='doppio']"):
                                 on_player_page = True
                         except Exception:
                             pass
@@ -1482,6 +1477,37 @@ def run_visual_mode(
                             else:
                                 _visual_log("auto_click_player: no click")
                             page.wait_for_timeout(500)
+                            if server_tab == "TV":
+                                page.wait_for_timeout(10_000)
+                                if try_click_player(page):
+                                    timeline("auto_click_player_second_tv")
+                                    _visual_log("auto_click_player: second click (TV)")
+                                page.wait_for_timeout(2_000)
+                                if try_click_player(page):
+                                    timeline("auto_click_player_third_tv")
+                                    _visual_log("auto_click_player: third click (TV)")
+                                page.wait_for_timeout(500)
+                            if not target_stream_seen_ref[0]:
+                                if try_click_player(page):
+                                    timeline("auto_click_player_extra_no_stream")
+                                    _visual_log("auto_click_player: extra click (stream not found)")
+                                page.wait_for_timeout(300)
+                                page.wait_for_timeout(5_000)
+                                try:
+                                    btn = page.locator("#jav-download-trigger").first
+                                    if btn.is_visible(timeout=1000):
+                                        btn.click(force=True)
+                                        timeline("auto_click_download_button")
+                                        _visual_log("auto_click: Download button clicked")
+                                        download_url = stream_url_for_download[0]
+                                        if download_url:
+                                            try:
+                                                LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
+                                                _visual_log(f"download_link_saved: {download_url[:100]}...")
+                                            except Exception:
+                                                pass
+                                except Exception:
+                                    pass
                 except Exception as e:
                     _visual_log(f"loop_error: {e!r}")
                     if isinstance(e, _TargetClosedError) or "closed" in str(e).lower():
@@ -1661,6 +1687,13 @@ def main() -> int:
         dest="no_auto_download",
         help="With --visual: do not start download automatically when target link appears",
     )
+    parser.add_argument(
+        "--server-tab",
+        "-s",
+        default="VOE",
+        metavar="TAB",
+        help="Server tab to click: VOE, ST, TV, FST (default: VOE)",
+    )
     args = parser.parse_args()
 
     if args.visual:
@@ -1668,14 +1701,14 @@ def main() -> int:
             args.url,
             auto_download=not getattr(args, "no_auto_download", False),
             output_filename=args.output,
+            server_tab=args.server_tab,
         )
         return 0
 
     try:
-        # Only VOE tab; ad overlays are dismissed so player iframe is accessible
         urls, video_code = extract_stream_urls(
             args.url,
-            server_tabs=["VOE"],
+            server_tabs=[args.server_tab],
             for_download=args.download,
         )
     except Exception as e:
