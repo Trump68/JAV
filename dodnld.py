@@ -946,7 +946,11 @@ def _visual_log(msg: str, log_file: Path | None = None) -> None:
         pass
 
 
-def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
+def run_visual_mode(
+    page_url: str,
+    auto_download: bool = True,
+    output_filename: str = "video.m4v",
+) -> None:
     """Open page in visible browser, log stream-related requests. User clicks VOE manually; link opens in same tab.
     After overlays are closed: auto-clicks player until target link appears; if auto_download, starts download automatically."""
     if DOWNLOAD_DIR.exists():
@@ -1231,11 +1235,12 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                         download_url = stream_url_for_download[0]
                         if download_url:
                             set_download_button_state("downloading")
+                            log("Auto-download started. You can close the browser; download will continue.")
                             try:
                                 LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
                             except Exception:
                                 pass
-                            out_path = DOWNLOAD_DIR / "video"
+                            out_path = DOWNLOAD_DIR / output_filename
                             stopped_by_user_ref[0] = False
                             download_proc_ref.clear()
 
@@ -1266,6 +1271,12 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                                         _visual_log(f"download_error: {e!r}")
 
                             threading.Thread(target=run_download, daemon=True).start()
+                            browser_closed_ref[0] = True
+                            try:
+                                context.close()
+                            except Exception:
+                                pass
+                            break
                         else:
                             set_download_button_state("no_url")
                             _visual_log("No stream URL (auto).")
@@ -1312,12 +1323,12 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                         download_url = stream_url_for_download[0]
                         if download_url:
                             set_download_button_state("downloading")
-                            log("Download started.")
+                            log("Download started. You can close the browser; download will continue.")
                             try:
                                 LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
                             except Exception:
                                 pass
-                            out_path = DOWNLOAD_DIR / "video"
+                            out_path = DOWNLOAD_DIR / output_filename
                             stopped_by_user_ref[0] = False
                             download_proc_ref.clear()
 
@@ -1348,6 +1359,12 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                                         _visual_log(f"download_error: {e!r}")
 
                             threading.Thread(target=run_download, daemon=True).start()
+                            browser_closed_ref[0] = True
+                            try:
+                                context.close()
+                            except Exception:
+                                pass
+                            break
                         else:
                             set_download_button_state("no_url")
                             _visual_log("No stream URL.")
@@ -1379,7 +1396,16 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                 except Exception as e:
                     _visual_log(f"loop_error: {e!r}")
                     if isinstance(e, _TargetClosedError) or "closed" in str(e).lower():
+                        browser_closed_ref[0] = True
                         break
+            if download_proc_ref:
+                log("Browser closed. Waiting for download to finish...")
+                try:
+                    for proc in list(download_proc_ref):
+                        proc.wait(timeout=3600)
+                except Exception:
+                    pass
+                log("Done.")
         finally:
             browser_closed_ref[0] = True
             if context is not None:
@@ -1427,7 +1453,10 @@ def download_video(
     If stopped_by_user is set by caller when killing, we return True (partial file saved)."""
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    out_tpl = str(output_path.with_suffix("")) + ".%(ext)s"
+    if output_path.suffix:
+        out_arg = str(output_path)
+    else:
+        out_arg = str(output_path.with_suffix("")) + ".%(ext)s"
     cmd = [
         sys.executable,
         "-u",
@@ -1435,9 +1464,10 @@ def download_video(
         "yt_dlp",
         "--no-warnings",
         "--newline",
+        "--no-part",
         "--add-header", f"Referer:{referer}",
         "--user-agent", USER_AGENT,
-        "-o", out_tpl,
+        "-o", out_arg,
         url,
     ]
     try:
@@ -1527,8 +1557,8 @@ def main() -> int:
     parser.add_argument(
         "-o",
         "--output",
-        default="video",
-        help="Output path for download (default: video)",
+        default="video.m4v",
+        help="Output filename for download (default: video.m4v); partial file saved under this name when interrupted",
     )
     parser.add_argument(
         "--visual",
@@ -1545,7 +1575,11 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.visual:
-        run_visual_mode(args.url, auto_download=not getattr(args, "no_auto_download", False))
+        run_visual_mode(
+            args.url,
+            auto_download=not getattr(args, "no_auto_download", False),
+            output_filename=args.output,
+        )
         return 0
 
     try:
