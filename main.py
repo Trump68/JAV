@@ -1102,6 +1102,15 @@ def run_visual_mode(page_url: str) -> None:
                         for t, act in timeline_entries:
                             log(f"  [{t}] {act}")
                         stream_url_for_download[0] = url
+                        # Явный вывод в терминал для анализа и последующей автоматизации
+                        _banner = "\n" + "=" * 60 + "\n  ССЫЛКА ДЛЯ СКАЧИВАНИЯ СТАЛА ДОСТУПНА\n" + "=" * 60
+                        print(_banner, file=sys.stderr)
+                        print("TARGET_URL_FULL:", url, file=sys.stderr)
+                        print("--- Действия до появления ссылки (для автоматизации) ---", file=sys.stderr)
+                        for t, act in timeline_entries:
+                            print(f"  [{t}] {act}", file=sys.stderr)
+                        print("=" * 60 + "\n", file=sys.stderr)
+                        sys.stderr.flush()
                     print(f"[STREAM] {url[:120]}{'...' if len(url) > 120 else ''}")
                     sys.stdout.flush()
 
