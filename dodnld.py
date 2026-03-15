@@ -127,6 +127,7 @@ STREAM_PATTERNS = (
 )
 # Domains to block (click hijack / redirect ads) — abort navigation so user stays on player
 BLOCKED_REDIRECT_DOMAINS = (
+    "goldensacam.com",
     "dillingers.ie",
     "dillingers.com",
     "cactusheadroomscaling",
@@ -163,6 +164,15 @@ BLOCKED_REDIRECT_DOMAINS = (
     "applovin",
     "inmobi",
     "tapjoy",
+)
+# Main frame is allowed to stay only on these; otherwise we go_back() to avoid ad redirects
+ALLOWED_MAIN_DOMAINS = (
+    "supjav.com",
+    "supremejav.com",
+    "turbovid",
+    "voe.sx",
+    "doppiocdn.com",
+    "edgeon-bandwidth.com",
 )
 
 # Substrings in URL to skip (ads, analytics, tracking)
@@ -1151,40 +1161,111 @@ def run_visual_mode(
             log("cloudflare_wait_done")
             timeline("cloudflare_passed")
             page.wait_for_timeout(2000)
-            dismiss_ad_overlays(page)
-            page.wait_for_timeout(500)
-            timeline("dismiss_ad_overlays_done")
             page.evaluate("""() => {
-                document.querySelectorAll('a[target="_blank"]').forEach(a => { a.removeAttribute('target'); });
+                document.querySelectorAll('a.btn-server[target="_blank"]').forEach(a => { a.removeAttribute('target'); });
             }""")
             timeline("remove_target_blank_done")
             page.wait_for_timeout(500)
-            add_download_button_to_main_frame()
-            timeline("download_button_injected_initial")
-            log("voe_click_start")
+            log("voe_click_start — only a.btn-server or SERVER block (avoid ad links)")
+            tab_clicked = False
             try:
-                tab = page.get_by_role("link", name=re.compile(r"VOE", re.I)).first
-                if not tab.is_visible(timeout=2000):
-                    tab = page.locator("a:has-text('VOE')").first
-                if tab.is_visible(timeout=2000):
-                    tab.click()
-                    timeline("voe_tab_clicked")
-                    page.wait_for_timeout(3000)
-                    try:
+                try:
+                    page.wait_for_selector('text=SERVER', timeout=8000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(500)
+                # Only click a.btn-server with exact text VOE (never get_by_text/link — can hit ad overlay)
+                try:
+                    btn = page.locator("a.btn-server").filter(has_text=re.compile(r"^VOE$")).first
+                    if btn.is_visible(timeout=3000):
+                        btn.scroll_into_view_if_needed()
+                        page.wait_for_timeout(200)
+                        btn.click(force=True)
+                        tab_clicked = True
+                except Exception:
+                    pass
+                if not tab_clicked:
+                    for frame in page.frames:
+                        try:
+                            btn = frame.locator("a.btn-server").filter(has_text=re.compile(r"^VOE$")).first
+                            if btn.is_visible(timeout=2000):
+                                btn.scroll_into_view_if_needed()
+                                page.wait_for_timeout(200)
+                                btn.click(force=True)
+                                tab_clicked = True
+                                break
+                        except Exception:
+                            pass
+                if not tab_clicked:
+                    # Fallback: click VOE only inside SERVER block (JS filters ad hrefs)
+                    _click_voe_js = """() => {
+                        var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com/i;
+                        var btns = document.querySelectorAll('a.btn-server');
+                        for (var i = 0; i < btns.length; i++) {
+                            var a = btns[i];
+                            if ((a.textContent || a.innerText || '').trim() !== 'VOE') continue;
+                            var h = (a.getAttribute('href') || '').trim();
+                            if (adLike.test(h)) continue;
+                            a.scrollIntoView({ block: 'center' });
+                            a.click();
+                            return true;
+                        }
+                        var server = null;
+                        document.querySelectorAll('*').forEach(function(el) {
+                            if (server) return;
+                            var t = (el.innerText || '').trim();
+                            if (t.indexOf('SERVER') >= 0 && t.indexOf('VOE') >= 0 && t.length < 150) {
+                                var links = el.querySelectorAll('a.btn-server');
+                                for (var j = 0; j < links.length; j++) {
+                                    var a = links[j];
+                                    if ((a.textContent || '').trim() !== 'VOE') continue;
+                                    if (adLike.test((a.getAttribute('href') || ''))) continue;
+                                    a.scrollIntoView({ block: 'center' });
+                                    a.click();
+                                    server = true;
+                                    return true;
+                                }
+                            }
+                        });
+                        return !!server;
+                    }"""
+                    tab_clicked = page.evaluate(_click_voe_js)
+                    if not tab_clicked:
                         for frame in page.frames:
+                            if frame == page.main_frame:
+                                continue
                             try:
-                                frame.evaluate(DOWNLOAD_BUTTON_SCRIPT)
+                                if frame.evaluate(_click_voe_js):
+                                    tab_clicked = True
+                                    break
                             except Exception:
                                 pass
-                        page.evaluate("() => !!window.__downloadBtnAttached")
-                        page.wait_for_timeout(800)
-                        add_download_button_to_main_frame()
-                    except Exception as ex:
-                        log(f"download_button_attach_error (after VOE) {ex!r}")
+                if tab_clicked:
+                    timeline("voe_tab_clicked")
+                    page.wait_for_timeout(3000)
                 else:
                     log("voe_tab_not_visible")
             except Exception as e:
                 log(f"voe_click_error {e!r}")
+            dismiss_ad_overlays(page)
+            page.wait_for_timeout(500)
+            timeline("dismiss_ad_overlays_done")
+            for _ in range(2):
+                try_close_ad_overlay(page)
+                page.wait_for_timeout(300)
+            add_download_button_to_main_frame()
+            timeline("download_button_injected_initial")
+            try:
+                for frame in page.frames:
+                    try:
+                        frame.evaluate(DOWNLOAD_BUTTON_SCRIPT)
+                    except Exception:
+                        pass
+                page.evaluate("() => !!window.__downloadBtnAttached")
+                page.wait_for_timeout(800)
+                add_download_button_to_main_frame()
+            except Exception as ex:
+                log(f"download_button_attach_error (after VOE) {ex!r}")
             stop_event = threading.Event()
 
             def wait_enter():
@@ -1283,6 +1364,14 @@ def run_visual_mode(
                     current_url = page.url
                     if any(dom in current_url for dom in BLOCKED_REDIRECT_DOMAINS):
                         _visual_log("blocked_ad_navigation going_back")
+                        try:
+                            page.go_back()
+                            page.wait_for_timeout(1000)
+                        except Exception:
+                            pass
+                        continue
+                    if not any(dom in current_url for dom in ALLOWED_MAIN_DOMAINS):
+                        _visual_log("foreign_site_navigation going_back")
                         try:
                             page.go_back()
                             page.wait_for_timeout(1000)
