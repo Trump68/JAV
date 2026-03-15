@@ -1091,7 +1091,7 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
             def timeline(action: str) -> None:
                 ts = _dt.now().strftime("%H:%M:%S.%f")[:-3]
                 timeline_entries.append((ts, action))
-                log(f"[TIMELINE] {ts} {action}")
+                _visual_log(f"[TIMELINE] {ts} {action}")
 
             def _is_target_stream_url(url: str) -> bool:
                 return all(part in url for part in TARGET_STREAM_URL_PARTS)
@@ -1129,20 +1129,11 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                     if _is_target_stream_url(url):
                         target_stream_seen_ref[0] = True
                         timeline(f"TARGET_STREAM_APPEARED: {url}")
-                        log("========== >>> TARGET STREAM LINK APPEARED <<< ==========")
-                        log(f"TARGET_URL_FULL: {url}")
+                        log("Target stream link appeared.")
+                        _visual_log(f"TARGET_URL_FULL: {url}")
                         for t, act in timeline_entries:
-                            log(f"  [{t}] {act}")
+                            _visual_log(f"  [{t}] {act}")
                         stream_url_for_download[0] = url
-                        # Явный вывод в терминал для анализа и последующей автоматизации
-                        _banner = "\n" + "=" * 60 + "\n  ССЫЛКА ДЛЯ СКАЧИВАНИЯ СТАЛА ДОСТУПНА\n" + "=" * 60
-                        print(_banner, file=sys.stderr)
-                        print("TARGET_URL_FULL:", url, file=sys.stderr)
-                        print("--- Действия до появления ссылки (для автоматизации) ---", file=sys.stderr)
-                        for t, act in timeline_entries:
-                            print(f"  [{t}] {act}", file=sys.stderr)
-                        print("=" * 60 + "\n", file=sys.stderr)
-                        sys.stderr.flush()
                         if auto_download:
                             auto_download_pending_ref[0] = True
                     print(f"[STREAM] {url[:120]}{'...' if len(url) > 120 else ''}")
@@ -1156,19 +1147,15 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
             log("cloudflare_wait_done")
             timeline("cloudflare_passed")
             page.wait_for_timeout(2000)
-            log("dismiss_ad_overlays_start")
             dismiss_ad_overlays(page)
             page.wait_for_timeout(500)
-            log("dismiss_ad_overlays_done")
             timeline("dismiss_ad_overlays_done")
             page.evaluate("""() => {
                 document.querySelectorAll('a[target="_blank"]').forEach(a => { a.removeAttribute('target'); });
             }""")
-            log("remove_target_blank_done")
             timeline("remove_target_blank_done")
             page.wait_for_timeout(500)
             add_download_button_to_main_frame()
-            log("download_button_injected (initial page)")
             timeline("download_button_injected_initial")
             log("voe_click_start")
             try:
@@ -1177,7 +1164,6 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                     tab = page.locator("a:has-text('VOE')").first
                 if tab.is_visible(timeout=2000):
                     tab.click()
-                    log("voe_click_done")
                     timeline("voe_tab_clicked")
                     page.wait_for_timeout(3000)
                     try:
@@ -1186,11 +1172,9 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                                 frame.evaluate(DOWNLOAD_BUTTON_SCRIPT)
                             except Exception:
                                 pass
-                        main_has = page.evaluate("() => !!window.__downloadBtnAttached")
-                        log(f"download_button_attached (after VOE) main_frame_has_listener={main_has}")
+                        page.evaluate("() => !!window.__downloadBtnAttached")
                         page.wait_for_timeout(800)
                         add_download_button_to_main_frame()
-                        log("download_button_injected (after VOE)")
                     except Exception as ex:
                         log(f"download_button_attach_error (after VOE) {ex!r}")
                 else:
@@ -1217,7 +1201,7 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                 """Called from download thread: only store progress; main thread updates the button."""
                 download_progress_text_ref[0] = text
 
-            log("loop_start: When stream is visible click orange 'Download' button. Click again during download to stop and save.")
+            log("Ready. Click Download when stream is visible; click again to stop download.")
             while True:
                 poll_interval = 0.4 if download_proc_ref else 2.0
                 if stop_event.wait(poll_interval):
@@ -1227,7 +1211,7 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                         set_download_button_progress(download_progress_text_ref[0])
                     if download_finished_ref[0] is not None:
                         set_download_button_state(download_finished_ref[0])
-                        log(f"========== DOWNLOAD STATE: {download_finished_ref[0].upper()} ==========")
+                        log(f"Download state: {download_finished_ref[0]}.")
                         download_finished_ref[0] = None
                         download_progress_text_ref[0] = None
                     if download_proc_ref and page.evaluate("() => !!window.__userStopDownload"):
@@ -1240,20 +1224,17 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                         download_proc_ref.clear()
                         page.evaluate("() => { window.__userStopDownload = false; }")
                         set_download_button_state("stopped")
-                        log("========== DOWNLOAD STOPPED (file saved) ==========")
+                        log("Download stopped (saved).")
                     if auto_download_pending_ref[0]:
                         auto_download_pending_ref[0] = False
-                        log("auto_download: target link appeared, starting download")
+                        log("Auto-download: target link appeared, starting.")
                         download_url = stream_url_for_download[0]
                         if download_url:
                             set_download_button_state("downloading")
-                            log("========== DOWNLOAD STARTED (auto) ==========")
-                            log(f"find_stream: using captured m3u8 url (len={len(download_url)})")
                             try:
                                 LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
-                                log(f"download_url_saved_to: {LAST_DOWNLOAD_URL_FILE}")
-                            except Exception as e:
-                                log(f"download_url_save_error: {e!r}")
+                            except Exception:
+                                pass
                             out_path = DOWNLOAD_DIR / "video"
                             stopped_by_user_ref[0] = False
                             download_proc_ref.clear()
@@ -1271,26 +1252,26 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                                     download_proc_ref.clear()
                                     if stopped_by_user_ref[0]:
                                         download_finished_ref[0] = "stopped"
-                                        log("========== DOWNLOAD STOPPED (file saved) ==========")
+                                        _visual_log("Download stopped (saved).")
                                     elif result:
                                         download_finished_ref[0] = "done"
-                                        log("========== DOWNLOAD FINISHED OK ==========")
+                                        log("Download finished.")
                                     else:
                                         download_finished_ref[0] = "failed"
-                                        log("========== DOWNLOAD FAILED ==========")
+                                        log("Download failed.")
                                 except Exception as e:
                                     download_proc_ref.clear()
                                     download_finished_ref[0] = "failed"
                                     if not isinstance(e, _TargetClosedError):
-                                        log(f"download_error {e!r}")
+                                        _visual_log(f"download_error: {e!r}")
 
                             threading.Thread(target=run_download, daemon=True).start()
                         else:
                             set_download_button_state("no_url")
-                            log("========== NO STREAM URL (auto) ==========")
+                            _visual_log("No stream URL (auto).")
                     current_url = page.url
                     if any(dom in current_url for dom in BLOCKED_REDIRECT_DOMAINS):
-                        log("blocked_ad_navigation going_back")
+                        _visual_log("blocked_ad_navigation going_back")
                         try:
                             page.go_back()
                             page.wait_for_timeout(1000)
@@ -1300,9 +1281,7 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                     if current_url != last_waited_url:
                         last_waited_url = current_url
                         timeline(f"page_changed: {current_url[:80]}...")
-                        log("page_changed waiting_cloudflare_player")
                         wait_for_player_page_loaded(page)
-                        log("page_changed_done")
                         timeline("player_page_loaded")
                         try:
                             for i, frame in enumerate(page.frames):
@@ -1310,12 +1289,9 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                                     frame.evaluate(DOWNLOAD_BUTTON_SCRIPT)
                                 except Exception:
                                     pass
-                            n_frames = len(page.frames)
-                            main_has = page.evaluate("() => !!window.__downloadBtnAttached")
-                            log(f"download_button_attached (after page change) frames={n_frames} main_frame_has_listener={main_has}")
+                            page.evaluate("() => !!window.__downloadBtnAttached")
                             page.wait_for_timeout(800)
                             add_download_button_to_main_frame()
-                            log("download_button_injected (after page change)")
                         except Exception as ex:
                             log(f"download_button_attach_error {ex!r}")
                     try:
@@ -1325,39 +1301,23 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                             raw: window.__userSawStream
                         })""")
                         user_saw_stream = isinstance(check, dict) and check.get("pressed") is True
-                        ctrl_r_time = check.get("time", 0) if isinstance(check, dict) else 0
                         _key_check_iters[0] += 1
-                        raw_val = check.get("raw") if isinstance(check, dict) else None
-                        if not user_saw_stream and isinstance(check, dict):
-                            if raw_val is not None and raw_val is not False:
-                                log(f"key_check_debug: raw __userSawStream={raw_val!r} (not true)")
-                        if _key_check_iters[0] % 15 == 1 and _key_check_iters[0] > 1:
-                            log("key_check: still waiting for download button (flag=false)")
                     except Exception as eval_err:
                         user_saw_stream = False
                         ctrl_r_time = 0
-                        log(f"key_check_error: evaluate failed {eval_err!r}")
+                        _visual_log(f"key_check_error: {eval_err!r}")
                     if user_saw_stream:
-                        from datetime import datetime
-                        ts = datetime.now().strftime("%H:%M:%S")
-                        log(f"key_check: download button clicked (flag=true, time={ctrl_r_time}) at {ts}")
                         timeline("user_clicked_download_button")
-                        log("key_combo: download button — starting download")
                         page.evaluate("() => { window.__userSawStream = false; window.__userSawStreamTime = 0; }")
                         download_url = stream_url_for_download[0]
                         if download_url:
                             set_download_button_state("downloading")
-                            log("========== DOWNLOAD STARTED ==========")
-                            log(f"find_stream: using captured m3u8 url (len={len(download_url)})")
-                            log(f"download_url_full: {download_url}")
+                            log("Download started.")
                             try:
                                 LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
-                                log(f"download_url_saved_to: {LAST_DOWNLOAD_URL_FILE}")
-                            except Exception as e:
-                                log(f"download_url_save_error: {e!r}")
+                            except Exception:
+                                pass
                             out_path = DOWNLOAD_DIR / "video"
-                            log(f"download_start: url={download_url[:80]}...")
-                            log(f"save_to: {out_path}.%(ext)s (folder: {out_path.parent})")
                             stopped_by_user_ref[0] = False
                             download_proc_ref.clear()
 
@@ -1374,26 +1334,25 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                                     download_proc_ref.clear()
                                     if stopped_by_user_ref[0]:
                                         download_finished_ref[0] = "stopped"
-                                        log("========== DOWNLOAD STOPPED (file saved) ==========")
+                                        _visual_log("Download stopped (saved).")
                                     elif result:
                                         download_finished_ref[0] = "done"
-                                        log("========== DOWNLOAD FINISHED OK ==========")
+                                        log("Download finished.")
                                     else:
                                         download_finished_ref[0] = "failed"
-                                        log("========== DOWNLOAD FAILED ==========")
+                                        log("Download failed.")
                                 except Exception as e:
                                     download_proc_ref.clear()
                                     download_finished_ref[0] = "failed"
                                     if not isinstance(e, _TargetClosedError):
-                                        log(f"download_error {e!r}")
+                                        _visual_log(f"download_error: {e!r}")
 
                             threading.Thread(target=run_download, daemon=True).start()
                         else:
                             set_download_button_state("no_url")
-                            log("========== NO STREAM URL — CANNOT DOWNLOAD ==========")
-                            log("find_stream: no m3u8 url captured yet")
+                            _visual_log("No stream URL.")
                     while try_close_ad_overlay(page):
-                        log("overlay_closed")
+                        _visual_log("overlay_closed")
                         timeline("overlay_closed")
                         page.wait_for_timeout(500)
                     on_player_page = current_url != page_url
@@ -1407,24 +1366,18 @@ def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
                         auto_click_iters[0] += 1
                         if auto_click_iters[0] >= 5:
                             auto_click_iters[0] = 0
-                            log("auto_click_player: attempt (on_player_page=True, target_not_seen)")
-                            print("[AUTO_CLICK] attempt (clicking player to start playback)", file=sys.stderr)
-                            sys.stderr.flush()
+                            _visual_log("auto_click_player: attempt")
                             for _ in range(3):
                                 try_close_ad_overlay(page)
                                 page.wait_for_timeout(300)
                             if try_click_player(page):
                                 timeline("auto_click_player")
-                                log("auto_click_player: clicked to start playback")
-                                print("[AUTO_CLICK] OK — clicked to start playback", file=sys.stderr)
-                                sys.stderr.flush()
+                                _visual_log("auto_click_player: clicked")
                             else:
-                                log("auto_click_player: no click (player element not found or not visible)")
-                                print("[AUTO_CLICK] FAIL — no click (player not found or not visible)", file=sys.stderr)
-                                sys.stderr.flush()
+                                _visual_log("auto_click_player: no click")
                             page.wait_for_timeout(500)
                 except Exception as e:
-                    log(f"loop_error {e!r}")
+                    _visual_log(f"loop_error: {e!r}")
                     if isinstance(e, _TargetClosedError) or "closed" in str(e).lower():
                         break
         finally:
