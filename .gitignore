@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Playwright profile (browser data)
+.playwright_profile/
+
+# Script-generated / local state
+.visual_mode.log
+.player_center.json
+video.*
+*.ytdl
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
