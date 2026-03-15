@@ -12,8 +12,10 @@ env/
 # Script-generated / local state
 .visual_mode.log
 .player_center.json
+last_download_url.txt
 video.*
 *.ytdl
+download/
 
 # IDE
 .idea/

@@ -7,15 +7,23 @@ Can download video from the VOE tab via yt-dlp.
 
 import argparse
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
+from typing import Callable
 from urllib.parse import urljoin, urlparse
 
 from playwright.sync_api import sync_playwright
+
+try:
+    from playwright._impl._errors import TargetClosedError as _TargetClosedError
+except ImportError:
+    _TargetClosedError = type("TargetClosedError", (Exception,), {})
 
 DEFAULT_URL = "https://supjav.com/403831.html"
 PAGE_TIMEOUT_MS = 30_000
@@ -122,6 +130,39 @@ BLOCKED_REDIRECT_DOMAINS = (
     "dillingers.ie",
     "dillingers.com",
     "cactusheadroomscaling",
+    "popads.",
+    "popcash.",
+    "exoclick",
+    "trafficjunky",
+    "juicyads",
+    "propellerads",
+    "adsterra",
+    "clickadu",
+    "hilltopads",
+    "outbrain",
+    "taboola",
+    "revcontent",
+    "mgid.com",
+    "onclkds",
+    "adsrvr",
+    "doubleclick",
+    "googlesyndication",
+    "adnxs",
+    "criteo",
+    "adform",
+    "smartadserver",
+    "rubiconproject",
+    "pubmatic",
+    "openx.net",
+    "clicksor",
+    "adskeeper",
+    "revenuehits",
+    "popmyads",
+    "adcolony",
+    "vungle",
+    "applovin",
+    "inmobi",
+    "tapjoy",
 )
 
 # Substrings in URL to skip (ads, analytics, tracking)
@@ -319,50 +360,7 @@ def try_close_ad_overlay(page) -> bool:
 
 
 def click_center_play_button(page) -> bool:
-    """Click only the saved element from .player_center.json (coords then selector)."""
-    def log_step(msg: str, err: Exception | None = None) -> None:
-        line = f"click_play: {msg}"
-        if err is not None:
-            line += f" | {type(err).__name__}: {err!s}"
-        _visual_log(line)
-
-    if not PLAYER_CENTER_FILE.exists():
-        log_step("no saved element")
-        return False
-    try:
-        data = json.loads(PLAYER_CENTER_FILE.read_text())
-    except Exception as e:
-        log_step("read saved failed", e)
-        return False
-    x, y = data.get("x"), data.get("y")
-    if x is not None and y is not None:
-        try:
-            log_step(f"trying saved coords x={x} y={y}")
-            page.mouse.click(x, y)
-            log_step("saved coords click ok")
-            return True
-        except Exception as e:
-            log_step("saved coords failed", e)
-    sel = data.get("selector")
-    if sel:
-        try:
-            log_step(f"trying saved selector {sel!r}")
-            page.locator(sel).first.scroll_into_view_if_needed(timeout=300)
-            page.locator(sel).first.click(force=True, timeout=400)
-            log_step("saved selector click ok")
-            return True
-        except Exception as e:
-            log_step("saved selector main failed", e)
-        for frame in page.frames:
-            if frame == page.main_frame:
-                continue
-            try:
-                frame.locator(sel).first.click(force=True, timeout=300)
-                log_step("saved selector in frame ok")
-                return True
-            except Exception:
-                pass
-    log_step("saved element click failed")
+    """No longer used: saved click from .player_center.json was removed."""
     return False
 
 
@@ -892,6 +890,15 @@ def wait_for_player_page_loaded(page, timeout_ms: int = CLOUDFLARE_WAIT_MS) -> N
 
 PLAYER_CENTER_FILE = Path(__file__).resolve().parent / ".player_center.json"
 VISUAL_LOG_FILE = Path(__file__).resolve().parent / ".visual_mode.log"
+DOWNLOAD_DIR = Path(__file__).resolve().parent / "download"
+LAST_DOWNLOAD_URL_FILE = Path(__file__).resolve().parent / "last_download_url.txt"
+
+# Target stream URL pattern: all substrings must be present (query params may vary between runs)
+TARGET_STREAM_URL_PARTS = (
+    "edgeon-bandwidth.com",
+    "1im9wjkozr96",
+    "index-v1-a1.m3u8",
+)
 
 
 def _visual_log(msg: str, log_file: Path | None = None) -> None:
@@ -910,10 +917,17 @@ def _visual_log(msg: str, log_file: Path | None = None) -> None:
 
 def run_visual_mode(page_url: str) -> None:
     """Open page in visible browser, log stream-related requests. User clicks VOE manually; link opens in same tab."""
+    if DOWNLOAD_DIR.exists():
+        try:
+            shutil.rmtree(DOWNLOAD_DIR)
+        except Exception:
+            pass
+    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     user_data_dir = Path(__file__).resolve().parent / ".playwright_profile"
     user_data_dir.mkdir(exist_ok=True)
     with sync_playwright() as p:
         context = None
+        browser_closed_ref = [False]
         try:
             kwargs = {
                 "headless": False,
@@ -928,43 +942,25 @@ def run_visual_mode(page_url: str) -> None:
                 kwargs["channel"] = "chrome"
             context = p.chromium.launch_persistent_context(str(user_data_dir), **kwargs)
             context.add_init_script(STEALTH_INIT_SCRIPT)
-            ALT_M_SCRIPT = """
+            DOWNLOAD_BUTTON_SCRIPT = """
                 (function() {
-                    if (window.__altMAttached) return;
-                    window.__altMAttached = true;
+                    if (window.__downloadBtnAttached) return;
+                    window.__downloadBtnAttached = true;
+                    window.__userStopDownload = false;
+                    window.__downloadInProgress = false;
                     function setStreamFlag() {
                         var t = window.top || window;
                         t.__userSawStream = true;
                         t.__userSawStreamTime = typeof Date !== 'undefined' ? Date.now() : 0;
                     }
-                    function onAltM(e) {
-                        var isM = (e.key === 'm' || e.key === 'M' || e.code === 'KeyM');
-                        if (e.altKey && isM) {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            var t = window.top || window;
-                            if (window === t) {
-                                setStreamFlag();
-                            } else {
-                                try { t.postMessage({ type: 'ALT_M_PRESSED' }, '*'); } catch (err) {}
-                            }
-                        }
-                    }
-                    document.addEventListener('keydown', onAltM, true);
-                    window.addEventListener('keydown', onAltM, true);
                     if (window === window.top) {
-                        window.addEventListener('message', function(e) {
-                            if (e.data && e.data.type === 'ALT_M_PRESSED') {
-                                setStreamFlag();
-                            }
-                        });
                         function addButton() {
                             if (document.getElementById('jav-download-trigger')) return;
                             var btn = document.createElement('button');
                             btn.id = 'jav-download-trigger';
-                            btn.textContent = 'Download (Alt+M)';
-                            btn.style.cssText = 'position:fixed !important; top:12px !important; right:12px !important; z-index:2147483647 !important; padding:12px 20px !important; background:#e65100 !important; color:#fff !important; border:none !important; border-radius:6px !important; cursor:pointer !important; font-size:16px !important; font-weight:bold !important; box-shadow:0 4px 12px rgba(0,0,0,0.5) !important;';
-                            btn.onclick = function() { setStreamFlag(); };
+                            btn.textContent = 'Download';
+                            btn.style.cssText = 'position:fixed !important; top:0 !important; left:0 !important; right:0 !important; width:100% !important; z-index:2147483647 !important; padding:14px 20px !important; background:#e65100 !important; color:#fff !important; border:none !important; border-radius:0 !important; cursor:pointer !important; font-size:16px !important; font-weight:bold !important; box-shadow:0 4px 12px rgba(0,0,0,0.5) !important; box-sizing:border-box !important;';
+                            btn.onclick = function() { var t = window.top || window; if (t.__downloadInProgress) { t.__userStopDownload = true; } else { setStreamFlag(); } };
                             (document.body || document.documentElement).appendChild(btn);
                         }
                         if (document.body) { addButton(); } else { document.addEventListener('DOMContentLoaded', addButton); }
@@ -972,7 +968,7 @@ def run_visual_mode(page_url: str) -> None:
                     }
                 })();
             """
-            context.add_init_script(ALT_M_SCRIPT)
+            context.add_init_script(DOWNLOAD_BUTTON_SCRIPT)
 
             def add_download_button_to_main_frame():
                 try:
@@ -982,9 +978,9 @@ def run_visual_mode(page_url: str) -> None:
                             if (document.getElementById('jav-download-trigger')) return;
                             var btn = document.createElement('button');
                             btn.id = 'jav-download-trigger';
-                            btn.textContent = 'Download (Alt+M)';
-                            btn.style.cssText = 'position:fixed !important; top:12px !important; right:12px !important; z-index:2147483647 !important; padding:12px 20px !important; background:#e65100 !important; color:#fff !important; border:none !important; border-radius:6px !important; cursor:pointer !important; font-size:16px !important; font-weight:bold !important; box-shadow:0 4px 12px rgba(0,0,0,0.5) !important;';
-                            btn.onclick = function() { var t = window.top || window; t.__userSawStream = true; t.__userSawStreamTime = Date.now ? Date.now() : 0; };
+                            btn.textContent = 'Download';
+                            btn.style.cssText = 'position:fixed !important; top:0 !important; left:0 !important; right:0 !important; width:100% !important; z-index:2147483647 !important; padding:14px 20px !important; background:#e65100 !important; color:#fff !important; border:none !important; border-radius:0 !important; cursor:pointer !important; font-size:16px !important; font-weight:bold !important; box-shadow:0 4px 12px rgba(0,0,0,0.5) !important; box-sizing:border-box !important;';
+                            btn.onclick = function() { var t = window.top || window; if (t.__downloadInProgress) { t.__userStopDownload = true; } else { t.__userSawStream = true; t.__userSawStreamTime = Date.now ? Date.now() : 0; } };
                             (document.body || document.documentElement).appendChild(btn);
                         })();
                     """)
@@ -993,20 +989,43 @@ def run_visual_mode(page_url: str) -> None:
 
             def set_download_button_state(state: str):
                 """state: 'idle' | 'downloading' | 'done' | 'failed' | 'no_url'"""
+                if browser_closed_ref[0]:
+                    return
                 try:
                     state_js = json.dumps(state)
                     page.evaluate(
                         f"""(function(state) {{
                             var btn = document.getElementById('jav-download-trigger');
                             if (!btn) return;
-                            var styles = {{ idle: '#e65100', downloading: '#555', done: '#2e7d32', failed: '#c62828', no_url: '#c62828' }};
-                            var texts = {{ idle: 'Download (Alt+M)', downloading: 'Downloading...', done: 'Done', failed: 'Failed', no_url: 'No URL' }};
+                            var styles = {{ idle: '#e65100', downloading: '#555', done: '#2e7d32', failed: '#c62828', no_url: '#c62828', stopped: '#2e7d32' }};
+                            var texts = {{ idle: 'Download', downloading: 'Downloading...', done: 'Done', failed: 'Failed', no_url: 'No URL', stopped: 'Stopped (saved)' }};
                             btn.textContent = texts[state] || state;
                             btn.style.background = styles[state] || '#555';
-                            btn.disabled = (state === 'downloading');
+                            btn.disabled = false;
+                            (window.top || window).__downloadInProgress = (state === 'downloading');
                         }})({state_js})"""
                     )
-                except Exception:
+                except (_TargetClosedError, Exception):
+                    pass
+
+            def set_download_button_progress(text: str):
+                """Set button text to progress string (e.g. '45% · 2.5 MB/s') during download."""
+                if browser_closed_ref[0]:
+                    return
+                try:
+                    safe = (text or "Downloading...")[:120]
+                    text_js = json.dumps(safe)
+                    page.evaluate(
+                        f"""(function(t) {{
+                            var btn = document.getElementById('jav-download-trigger');
+                            if (!btn) return;
+                            btn.textContent = t;
+                            btn.style.background = '#555';
+                            btn.disabled = false;
+                            (window.top || window).__downloadInProgress = true;
+                        }})({text_js})"""
+                    )
+                except (_TargetClosedError, Exception):
                     pass
             context.set_default_timeout(PAGE_TIMEOUT_MS)
 
@@ -1034,10 +1053,24 @@ def run_visual_mode(page_url: str) -> None:
                 _visual_log(msg)
                 print(msg, file=sys.stderr)
 
+            from datetime import datetime as _dt
+            timeline_entries: list[tuple[str, str]] = []
+
+            def timeline(action: str) -> None:
+                ts = _dt.now().strftime("%H:%M:%S.%f")[:-3]
+                timeline_entries.append((ts, action))
+                log(f"[TIMELINE] {ts} {action}")
+
+            def _is_target_stream_url(url: str) -> bool:
+                return all(part in url for part in TARGET_STREAM_URL_PARTS)
+
             log("visual_mode started")
+            timeline("start")
             log(f"goto {page_url}")
+            timeline("goto_page")
 
             stream_url_for_download = [None]  # best m3u8 for download (HLS playlist, not jwplayer assets)
+            target_stream_seen_ref = [False]
 
             def _is_hls_playlist_url(url: str) -> bool:
                 if ".m3u8" not in url:
@@ -1060,26 +1093,40 @@ def run_visual_mode(page_url: str) -> None:
                 if is_stream_url(url) or (response.headers.get("content-type") and is_media_content_type(response.headers.get("content-type", ""))):
                     if _is_hls_playlist_url(url):
                         stream_url_for_download[0] = url
+                        timeline("stream_captured_m3u8")
+                    if _is_target_stream_url(url):
+                        target_stream_seen_ref[0] = True
+                        timeline(f"TARGET_STREAM_APPEARED: {url}")
+                        log("========== >>> TARGET STREAM LINK APPEARED <<< ==========")
+                        log(f"TARGET_URL_FULL: {url}")
+                        for t, act in timeline_entries:
+                            log(f"  [{t}] {act}")
+                        stream_url_for_download[0] = url
                     print(f"[STREAM] {url[:120]}{'...' if len(url) > 120 else ''}")
                     sys.stdout.flush()
 
             page.on("response", on_response)
             page.goto(page_url, wait_until="load", timeout=PAGE_TIMEOUT_MS)
+            timeline("page_loaded")
             log("cloudflare_wait_start")
             wait_for_cloudflare_pass(page)
             log("cloudflare_wait_done")
+            timeline("cloudflare_passed")
             page.wait_for_timeout(2000)
             log("dismiss_ad_overlays_start")
             dismiss_ad_overlays(page)
             page.wait_for_timeout(500)
             log("dismiss_ad_overlays_done")
+            timeline("dismiss_ad_overlays_done")
             page.evaluate("""() => {
                 document.querySelectorAll('a[target="_blank"]').forEach(a => { a.removeAttribute('target'); });
             }""")
             log("remove_target_blank_done")
+            timeline("remove_target_blank_done")
             page.wait_for_timeout(500)
             add_download_button_to_main_frame()
             log("download_button_injected (initial page)")
+            timeline("download_button_injected_initial")
             log("voe_click_start")
             try:
                 tab = page.get_by_role("link", name=re.compile(r"VOE", re.I)).first
@@ -1088,20 +1135,21 @@ def run_visual_mode(page_url: str) -> None:
                 if tab.is_visible(timeout=2000):
                     tab.click()
                     log("voe_click_done")
+                    timeline("voe_tab_clicked")
                     page.wait_for_timeout(3000)
                     try:
                         for frame in page.frames:
                             try:
-                                frame.evaluate(ALT_M_SCRIPT)
+                                frame.evaluate(DOWNLOAD_BUTTON_SCRIPT)
                             except Exception:
                                 pass
-                        main_has = page.evaluate("() => !!window.__altMAttached")
-                        log(f"alt_m_listener_attached (after VOE) main_frame_has_listener={main_has}")
+                        main_has = page.evaluate("() => !!window.__downloadBtnAttached")
+                        log(f"download_button_attached (after VOE) main_frame_has_listener={main_has}")
                         page.wait_for_timeout(800)
                         add_download_button_to_main_frame()
                         log("download_button_injected (after VOE)")
                     except Exception as ex:
-                        log(f"alt_m_attach_error (after VOE) {ex!r}")
+                        log(f"download_button_attach_error (after VOE) {ex!r}")
                 else:
                     log("voe_tab_not_visible")
             except Exception as e:
@@ -1115,29 +1163,69 @@ def run_visual_mode(page_url: str) -> None:
             threading.Thread(target=wait_enter, daemon=True).start()
             last_waited_url = page.url
             _key_check_iters = [0]
-            log("loop_start: When stream is visible: click blue 'Download (Alt+M)' button top-right, or press Alt+M (click page first). Press Enter to close.")
-            while not stop_event.wait(2):
+            download_proc_ref: list = []
+            stopped_by_user_ref: list = [False]
+            download_progress_text_ref: list = [None]
+            download_finished_ref: list = [None]
+
+            def progress_from_download_thread(text: str):
+                """Called from download thread: only store progress; main thread updates the button."""
+                download_progress_text_ref[0] = text
+
+            log("loop_start: When stream is visible click orange 'Download' button. Click again during download to stop and save.")
+            while True:
+                poll_interval = 0.4 if download_proc_ref else 2.0
+                if stop_event.wait(poll_interval):
+                    break
                 try:
+                    if download_progress_text_ref[0] is not None:
+                        set_download_button_progress(download_progress_text_ref[0])
+                    if download_finished_ref[0] is not None:
+                        set_download_button_state(download_finished_ref[0])
+                        log(f"========== DOWNLOAD STATE: {download_finished_ref[0].upper()} ==========")
+                        download_finished_ref[0] = None
+                        download_progress_text_ref[0] = None
+                    if download_proc_ref and page.evaluate("() => !!window.__userStopDownload"):
+                        try:
+                            stopped_by_user_ref[0] = True
+                            download_proc_ref[0].kill()
+                            download_proc_ref[0].wait(timeout=5)
+                        except Exception:
+                            pass
+                        download_proc_ref.clear()
+                        page.evaluate("() => { window.__userStopDownload = false; }")
+                        set_download_button_state("stopped")
+                        log("========== DOWNLOAD STOPPED (file saved) ==========")
                     current_url = page.url
+                    if any(dom in current_url for dom in BLOCKED_REDIRECT_DOMAINS):
+                        log("blocked_ad_navigation going_back")
+                        try:
+                            page.go_back()
+                            page.wait_for_timeout(1000)
+                        except Exception:
+                            pass
+                        continue
                     if current_url != last_waited_url:
                         last_waited_url = current_url
+                        timeline(f"page_changed: {current_url[:80]}...")
                         log("page_changed waiting_cloudflare_player")
                         wait_for_player_page_loaded(page)
                         log("page_changed_done")
+                        timeline("player_page_loaded")
                         try:
                             for i, frame in enumerate(page.frames):
                                 try:
-                                    frame.evaluate(ALT_M_SCRIPT)
+                                    frame.evaluate(DOWNLOAD_BUTTON_SCRIPT)
                                 except Exception:
                                     pass
                             n_frames = len(page.frames)
-                            main_has = page.evaluate("() => !!window.__altMAttached")
-                            log(f"alt_m_listener_attached (after page change) frames={n_frames} main_frame_has_listener={main_has}")
+                            main_has = page.evaluate("() => !!window.__downloadBtnAttached")
+                            log(f"download_button_attached (after page change) frames={n_frames} main_frame_has_listener={main_has}")
                             page.wait_for_timeout(800)
                             add_download_button_to_main_frame()
                             log("download_button_injected (after page change)")
                         except Exception as ex:
-                            log(f"alt_m_attach_error {ex!r}")
+                            log(f"download_button_attach_error {ex!r}")
                     try:
                         check = page.evaluate("""() => ({
                             pressed: window.__userSawStream === true,
@@ -1147,14 +1235,12 @@ def run_visual_mode(page_url: str) -> None:
                         user_saw_stream = isinstance(check, dict) and check.get("pressed") is True
                         ctrl_r_time = check.get("time", 0) if isinstance(check, dict) else 0
                         _key_check_iters[0] += 1
-                        pressed_val = check.get("pressed") if isinstance(check, dict) else None
                         raw_val = check.get("raw") if isinstance(check, dict) else None
-                        log(f"key_check_poll: iter={_key_check_iters[0]} pressed={pressed_val!r} raw={raw_val!r}")
                         if not user_saw_stream and isinstance(check, dict):
                             if raw_val is not None and raw_val is not False:
                                 log(f"key_check_debug: raw __userSawStream={raw_val!r} (not true)")
                         if _key_check_iters[0] % 15 == 1 and _key_check_iters[0] > 1:
-                            log("key_check: still waiting for Alt+M (flag=false)")
+                            log("key_check: still waiting for download button (flag=false)")
                     except Exception as eval_err:
                         user_saw_stream = False
                         ctrl_r_time = 0
@@ -1162,44 +1248,117 @@ def run_visual_mode(page_url: str) -> None:
                     if user_saw_stream:
                         from datetime import datetime
                         ts = datetime.now().strftime("%H:%M:%S")
-                        log(f"key_check: Alt+M was pressed (flag=true, time={ctrl_r_time}) at {ts}")
-                        log("key_combo: Alt+M detected — user confirmed stream visible")
+                        log(f"key_check: download button clicked (flag=true, time={ctrl_r_time}) at {ts}")
+                        timeline("user_clicked_download_button")
+                        log("key_combo: download button — starting download")
                         page.evaluate("() => { window.__userSawStream = false; window.__userSawStreamTime = 0; }")
                         download_url = stream_url_for_download[0]
                         if download_url:
                             set_download_button_state("downloading")
                             log("========== DOWNLOAD STARTED ==========")
                             log(f"find_stream: using captured m3u8 url (len={len(download_url)})")
-                            out_path = Path("video").resolve()
+                            log(f"download_url_full: {download_url}")
+                            try:
+                                LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
+                                log(f"download_url_saved_to: {LAST_DOWNLOAD_URL_FILE}")
+                            except Exception as e:
+                                log(f"download_url_save_error: {e!r}")
+                            out_path = DOWNLOAD_DIR / "video"
                             log(f"download_start: url={download_url[:80]}...")
                             log(f"save_to: {out_path}.%(ext)s (folder: {out_path.parent})")
-                            if download_video(download_url, out_path, referer="https://supjav.com/"):
-                                set_download_button_state("done")
-                                log("========== DOWNLOAD FINISHED OK ==========")
-                            else:
-                                set_download_button_state("failed")
-                                log("========== DOWNLOAD FAILED ==========")
+                            stopped_by_user_ref[0] = False
+                            download_proc_ref.clear()
+
+                            def run_download():
+                                try:
+                                    result = download_video(
+                                        download_url,
+                                        out_path,
+                                        referer="https://supjav.com/",
+                                        progress_callback=progress_from_download_thread,
+                                        out_proc=download_proc_ref,
+                                        stopped_by_user=stopped_by_user_ref,
+                                    )
+                                    download_proc_ref.clear()
+                                    if stopped_by_user_ref[0]:
+                                        download_finished_ref[0] = "stopped"
+                                        log("========== DOWNLOAD STOPPED (file saved) ==========")
+                                    elif result:
+                                        download_finished_ref[0] = "done"
+                                        log("========== DOWNLOAD FINISHED OK ==========")
+                                    else:
+                                        download_finished_ref[0] = "failed"
+                                        log("========== DOWNLOAD FAILED ==========")
+                                except Exception as e:
+                                    download_proc_ref.clear()
+                                    download_finished_ref[0] = "failed"
+                                    if not isinstance(e, _TargetClosedError):
+                                        log(f"download_error {e!r}")
+
+                            threading.Thread(target=run_download, daemon=True).start()
                         else:
                             set_download_button_state("no_url")
                             log("========== NO STREAM URL — CANNOT DOWNLOAD ==========")
                             log("find_stream: no m3u8 url captured yet")
                     while try_close_ad_overlay(page):
                         log("overlay_closed")
+                        timeline("overlay_closed")
                         page.wait_for_timeout(500)
                 except Exception as e:
                     log(f"loop_error {e!r}")
+                    if isinstance(e, _TargetClosedError) or "closed" in str(e).lower():
+                        break
         finally:
+            browser_closed_ref[0] = True
             if context is not None:
-                context.close()
+                try:
+                    context.close()
+                except BaseException:
+                    pass
 
 
-def download_video(url: str, output_path: str | Path, referer: str = "https://supjav.com/") -> bool:
-    """Download video from URL using yt-dlp. Returns True on success. Progress is printed to stderr."""
+def _parse_ytdlp_progress(line: str) -> str | None:
+    """Extract short progress string from yt-dlp stdout/stderr line. Returns None if not a progress line."""
+    # [download]  45.2% of 120.00MiB at 2.50MiB/s ETA 00:25
+    if "download" not in line.lower() and "MiB" not in line and "KiB" not in line and "ETA" not in line:
+        return None
+    m = re.search(r"(\d+\.?\d*)%\s*(?:of\s|\s|$)", line)
+    if not m:
+        return None
+    pct = m.group(1)
+    speed = ""
+    eta = ""
+    sm = re.search(r"at\s+([^\s]+)", line)
+    if sm:
+        speed = sm.group(1).strip()
+    em = re.search(r"ETA\s+([^\s]+)", line)
+    if em:
+        eta = em.group(1).strip()
+    if speed and eta:
+        return f"{pct}% · {speed} · ETA {eta}"
+    if speed:
+        return f"{pct}% · {speed}"
+    return f"{pct}%"
+
+
+def download_video(
+    url: str,
+    output_path: str | Path,
+    referer: str = "https://supjav.com/",
+    progress_callback: Callable[[str], None] | None = None,
+    out_proc: list | None = None,
+    stopped_by_user: list | None = None,
+) -> bool:
+    """Download video from URL using yt-dlp. Returns True on success.
+    If progress_callback is given, call it with progress string during download.
+    If out_proc is a list, the Popen process is appended so caller can kill it to stop and save.
+    If stopped_by_user is set by caller when killing, we return True (partial file saved)."""
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     out_tpl = str(output_path.with_suffix("")) + ".%(ext)s"
     cmd = [
         sys.executable,
+        "-u",
         "-m",
         "yt_dlp",
         "--no-warnings",
@@ -1210,6 +1369,57 @@ def download_video(url: str, output_path: str | Path, referer: str = "https://su
         url,
     ]
     try:
+        if progress_callback is not None:
+            try:
+                progress_callback("Downloading...")
+            except Exception:
+                pass
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                bufsize=1,
+                env=env,
+            )
+            if out_proc is not None:
+                out_proc.clear()
+                out_proc.append(proc)
+            assert proc.stdout is not None
+            assert proc.stderr is not None
+
+            def read_stderr():
+                for line in proc.stderr:
+                    print(line, end="", file=sys.stderr)
+
+            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            stderr_thread.start()
+            for line in proc.stdout:
+                print(line, end="", file=sys.stderr)
+                parsed = _parse_ytdlp_progress(line)
+                if parsed:
+                    try:
+                        progress_callback(parsed)
+                    except Exception:
+                        pass
+            stderr_thread.join(timeout=0.5)
+            try:
+                proc.wait(timeout=600)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+                print("Download failed (timeout)", file=sys.stderr)
+                return False
+            if stopped_by_user and stopped_by_user[0]:
+                return True
+            if proc.returncode != 0:
+                print(f"Download failed (exit {proc.returncode})", file=sys.stderr)
+                return False
+            return True
         result = subprocess.run(
             cmd,
             check=True,
