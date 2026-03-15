@@ -369,6 +369,20 @@ def try_close_ad_overlay(page) -> bool:
     return False
 
 
+def _click_center(page, locator) -> bool:
+    """Click element by moving mouse to its center (more reliable for some buttons e.g. ST)."""
+    try:
+        box = locator.bounding_box(timeout=2000)
+        if not box or not box.get("width") or not box.get("height"):
+            return False
+        x = box["x"] + box["width"] / 2
+        y = box["y"] + box["height"] / 2
+        page.mouse.click(x, y)
+        return True
+    except Exception:
+        return False
+
+
 def click_center_play_button(page) -> bool:
     """No longer used: saved click from .player_center.json was removed."""
     return False
@@ -1159,87 +1173,121 @@ def run_visual_mode(
             }""")
             timeline("remove_target_blank_done")
             page.wait_for_timeout(500)
-            log(f"server_tab_click_start ({server_tab}) — only a.btn-server or SERVER block (avoid ad links)")
+            tabs_to_try = ["VOE", "TV", "ST"] if server_tab == "VOE" else [server_tab]
+            log(f"server_tab_click_start (try: {tabs_to_try}) — only a.btn-server or SERVER block (avoid ad links)")
             tab_clicked = False
-            _tab_label_esc = re.escape(server_tab)
             try:
                 try:
                     page.wait_for_selector('text=SERVER', timeout=8000)
                 except Exception:
                     pass
                 page.wait_for_timeout(500)
-                # Only click a.btn-server with exact text (VOE, ST, etc.) — never get_by_text/link (can hit ad overlay)
-                try:
-                    btn = page.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
-                    if btn.is_visible(timeout=3000):
-                        btn.scroll_into_view_if_needed()
-                        page.wait_for_timeout(200)
-                        btn.click(force=True)
-                        tab_clicked = True
-                except Exception:
-                    pass
-                if not tab_clicked:
-                    for frame in page.frames:
+                for try_tab in tabs_to_try:
+                    tab_clicked = False
+                    if try_tab == "ST":
+                        dismiss_ad_overlays(page)
+                        page.wait_for_timeout(400)
+                        for _ in range(2):
+                            try_close_ad_overlay(page)
+                            page.wait_for_timeout(200)
+                    _tab_label_esc = re.escape(try_tab)
+                    # Only click a.btn-server with exact text (VOE, ST, etc.) — never get_by_text/link (can hit ad overlay)
+                    try:
+                        btn = page.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
+                        if btn.is_visible(timeout=3000):
+                            btn.scroll_into_view_if_needed()
+                            page.wait_for_timeout(200)
+                            tab_clicked = (_click_center(page, btn) or btn.click(force=True)) if try_tab == "ST" else btn.click(force=True)
+                    except Exception:
+                        pass
+                    if not tab_clicked:
+                        for frame in page.frames:
+                            try:
+                                btn = frame.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
+                                if btn.is_visible(timeout=2000):
+                                    btn.scroll_into_view_if_needed()
+                                    page.wait_for_timeout(200)
+                                    if try_tab == "ST":
+                                        tab_clicked = _click_center(page, btn) or btn.click(force=True)
+                                    else:
+                                        tab_clicked = btn.click(force=True)
+                                    if tab_clicked:
+                                        break
+                            except Exception:
+                                pass
+                    if not tab_clicked:
+                        _label_esc_js = try_tab.replace("\\", "\\\\").replace("'", "\\'")
+                        _click_tab_js = f"""() => {{
+                            var label = '{_label_esc_js}';
+                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com/i;
+                            var btns = document.querySelectorAll('a.btn-server');
+                            for (var i = 0; i < btns.length; i++) {{
+                                var a = btns[i];
+                                if ((a.textContent || a.innerText || '').trim() !== label) continue;
+                                var h = (a.getAttribute('href') || '').trim();
+                                if (adLike.test(h)) continue;
+                                a.scrollIntoView({{ block: 'center' }});
+                                a.click();
+                                return true;
+                            }}
+                            var server = null;
+                            document.querySelectorAll('*').forEach(function(el) {{
+                                if (server) return;
+                                var t = (el.innerText || '').trim();
+                                if (t.indexOf('SERVER') >= 0 && t.indexOf(label) >= 0 && t.length < 150) {{
+                                    var links = el.querySelectorAll('a.btn-server');
+                                    for (var j = 0; j < links.length; j++) {{
+                                        var a = links[j];
+                                        if ((a.textContent || '').trim() !== label) continue;
+                                        if (adLike.test((a.getAttribute('href') || ''))) continue;
+                                        a.scrollIntoView({{ block: 'center' }});
+                                        a.click();
+                                        server = true;
+                                        return true;
+                                    }}
+                                }}
+                            }});
+                            return !!server;
+                        }}"""
+                        tab_clicked = page.evaluate(_click_tab_js)
+                        if not tab_clicked:
+                            for frame in page.frames:
+                                if frame == page.main_frame:
+                                    continue
+                                try:
+                                    if frame.evaluate(_click_tab_js):
+                                        tab_clicked = True
+                                        break
+                                except Exception:
+                                    pass
+                    if tab_clicked:
+                        server_tab = try_tab
+                        timeline(f"server_tab_clicked_{server_tab}")
+                        break
+                    if try_tab == "ST" and not tab_clicked:
+                        page.wait_for_timeout(2_000)
+                        dismiss_ad_overlays(page)
+                        page.wait_for_timeout(400)
+                        try_close_ad_overlay(page)
                         try:
-                            btn = frame.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
+                            btn = page.locator("a.btn-server").filter(has_text=re.compile(r"^ST$")).first
                             if btn.is_visible(timeout=2000):
                                 btn.scroll_into_view_if_needed()
                                 page.wait_for_timeout(200)
-                                btn.click(force=True)
-                                tab_clicked = True
-                                break
+                                tab_clicked = _click_center(page, btn) or btn.click(force=True)
                         except Exception:
                             pass
+                        if not tab_clicked:
+                            tab_clicked = page.evaluate(_click_tab_js)
+                        if tab_clicked:
+                            server_tab = "ST"
+                            timeline("server_tab_clicked_st")
+                            break
+                    page.wait_for_timeout(300)
                 if not tab_clicked:
-                    # Fallback: click tab only inside SERVER block (JS filters ad hrefs)
-                    _click_tab_js = f"""() => {{
-                        var label = '{server_tab.replace(chr(39), chr(92)+chr(39))}';
-                        var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com/i;
-                        var btns = document.querySelectorAll('a.btn-server');
-                        for (var i = 0; i < btns.length; i++) {{
-                            var a = btns[i];
-                            if ((a.textContent || a.innerText || '').trim() !== label) continue;
-                            var h = (a.getAttribute('href') || '').trim();
-                            if (adLike.test(h)) continue;
-                            a.scrollIntoView({{ block: 'center' }});
-                            a.click();
-                            return true;
-                        }}
-                        var server = null;
-                        document.querySelectorAll('*').forEach(function(el) {{
-                            if (server) return;
-                            var t = (el.innerText || '').trim();
-                            if (t.indexOf('SERVER') >= 0 && t.indexOf(label) >= 0 && t.length < 150) {{
-                                var links = el.querySelectorAll('a.btn-server');
-                                for (var j = 0; j < links.length; j++) {{
-                                    var a = links[j];
-                                    if ((a.textContent || '').trim() !== label) continue;
-                                    if (adLike.test((a.getAttribute('href') || ''))) continue;
-                                    a.scrollIntoView({{ block: 'center' }});
-                                    a.click();
-                                    server = true;
-                                    return true;
-                                }}
-                            }}
-                        }});
-                        return !!server;
-                    }}"""
-                    tab_clicked = page.evaluate(_click_tab_js)
-                    if not tab_clicked:
-                        for frame in page.frames:
-                            if frame == page.main_frame:
-                                continue
-                            try:
-                                if frame.evaluate(_click_tab_js):
-                                    tab_clicked = True
-                                    break
-                            except Exception:
-                                pass
-                if tab_clicked:
-                    timeline(f"server_tab_clicked_{server_tab}")
-                    page.wait_for_timeout(3000)
+                    log(f"server_tab_not_visible (tried {tabs_to_try})")
                 else:
-                    log(f"server_tab_not_visible ({server_tab})")
+                    page.wait_for_timeout(3000)
             except Exception as e:
                 log(f"server_tab_click_error {e!r}")
             dismiss_ad_overlays(page)
@@ -1477,15 +1525,15 @@ def run_visual_mode(
                             else:
                                 _visual_log("auto_click_player: no click")
                             page.wait_for_timeout(500)
-                            if server_tab == "TV":
+                            if server_tab in ("TV", "ST"):
                                 page.wait_for_timeout(10_000)
                                 if try_click_player(page):
-                                    timeline("auto_click_player_second_tv")
-                                    _visual_log("auto_click_player: second click (TV)")
+                                    timeline(f"auto_click_player_second_{server_tab.lower()}")
+                                    _visual_log(f"auto_click_player: second click ({server_tab})")
                                 page.wait_for_timeout(2_000)
                                 if try_click_player(page):
-                                    timeline("auto_click_player_third_tv")
-                                    _visual_log("auto_click_player: third click (TV)")
+                                    timeline(f"auto_click_player_third_{server_tab.lower()}")
+                                    _visual_log(f"auto_click_player: third click ({server_tab})")
                                 page.wait_for_timeout(500)
                             if not target_stream_seen_ref[0]:
                                 if try_click_player(page):
@@ -1692,7 +1740,7 @@ def main() -> int:
         "-s",
         default="VOE",
         metavar="TAB",
-        help="Server tab to click: VOE, ST, TV, FST (default: VOE)",
+        help="Server tab: VOE (default: try VOE then TV then ST), or ST, TV, FST",
     )
     args = parser.parse_args()
 
