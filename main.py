@@ -431,6 +431,37 @@ def get_jw_video_blob_info(page) -> dict | None:
 def try_click_player(page) -> bool:
     """Click video or play button to start playback (after ads are gone). Returns True if clicked."""
     try:
+        # Same strategy as headless: find player iframe by selector, then click inside (video / body / center)
+        try:
+            page.wait_for_selector("iframe[src*='supremejav'], iframe[src^='http']", timeout=3000)
+        except Exception:
+            pass
+        iframe_el = page.query_selector("iframe[src*='supremejav']") or page.query_selector("iframe[src^='http']")
+        if iframe_el:
+            frame = iframe_el.content_frame()
+            if frame:
+                try:
+                    frame.locator("video").first.click(force=True, timeout=2000)
+                    return True
+                except Exception:
+                    pass
+                try:
+                    frame.locator("body").first.click(force=True, timeout=2000)
+                    return True
+                except Exception:
+                    pass
+                try:
+                    box = iframe_el.bounding_box()
+                    if box and box.get("width") and box.get("height"):
+                        cx = box["x"] + box["width"] / 2
+                        cy = box["y"] + box["height"] / 2
+                        page.mouse.click(cx, cy)
+                        return True
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    try:
         # Main page: video element or Play button
         for loc in [
             page.locator("video").first,
@@ -915,8 +946,9 @@ def _visual_log(msg: str, log_file: Path | None = None) -> None:
         pass
 
 
-def run_visual_mode(page_url: str) -> None:
-    """Open page in visible browser, log stream-related requests. User clicks VOE manually; link opens in same tab."""
+def run_visual_mode(page_url: str, auto_download: bool = True) -> None:
+    """Open page in visible browser, log stream-related requests. User clicks VOE manually; link opens in same tab.
+    After overlays are closed: auto-clicks player until target link appears; if auto_download, starts download automatically."""
     if DOWNLOAD_DIR.exists():
         try:
             shutil.rmtree(DOWNLOAD_DIR)
@@ -1111,6 +1143,8 @@ def run_visual_mode(page_url: str) -> None:
                             print(f"  [{t}] {act}", file=sys.stderr)
                         print("=" * 60 + "\n", file=sys.stderr)
                         sys.stderr.flush()
+                        if auto_download:
+                            auto_download_pending_ref[0] = True
                     print(f"[STREAM] {url[:120]}{'...' if len(url) > 120 else ''}")
                     sys.stdout.flush()
 
@@ -1172,10 +1206,12 @@ def run_visual_mode(page_url: str) -> None:
             threading.Thread(target=wait_enter, daemon=True).start()
             last_waited_url = page.url
             _key_check_iters = [0]
+            auto_click_iters = [0]
             download_proc_ref: list = []
             stopped_by_user_ref: list = [False]
             download_progress_text_ref: list = [None]
             download_finished_ref: list = [None]
+            auto_download_pending_ref: list = [False]
 
             def progress_from_download_thread(text: str):
                 """Called from download thread: only store progress; main thread updates the button."""
@@ -1205,6 +1241,53 @@ def run_visual_mode(page_url: str) -> None:
                         page.evaluate("() => { window.__userStopDownload = false; }")
                         set_download_button_state("stopped")
                         log("========== DOWNLOAD STOPPED (file saved) ==========")
+                    if auto_download_pending_ref[0]:
+                        auto_download_pending_ref[0] = False
+                        log("auto_download: target link appeared, starting download")
+                        download_url = stream_url_for_download[0]
+                        if download_url:
+                            set_download_button_state("downloading")
+                            log("========== DOWNLOAD STARTED (auto) ==========")
+                            log(f"find_stream: using captured m3u8 url (len={len(download_url)})")
+                            try:
+                                LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
+                                log(f"download_url_saved_to: {LAST_DOWNLOAD_URL_FILE}")
+                            except Exception as e:
+                                log(f"download_url_save_error: {e!r}")
+                            out_path = DOWNLOAD_DIR / "video"
+                            stopped_by_user_ref[0] = False
+                            download_proc_ref.clear()
+
+                            def run_download():
+                                try:
+                                    result = download_video(
+                                        download_url,
+                                        out_path,
+                                        referer="https://supjav.com/",
+                                        progress_callback=progress_from_download_thread,
+                                        out_proc=download_proc_ref,
+                                        stopped_by_user=stopped_by_user_ref,
+                                    )
+                                    download_proc_ref.clear()
+                                    if stopped_by_user_ref[0]:
+                                        download_finished_ref[0] = "stopped"
+                                        log("========== DOWNLOAD STOPPED (file saved) ==========")
+                                    elif result:
+                                        download_finished_ref[0] = "done"
+                                        log("========== DOWNLOAD FINISHED OK ==========")
+                                    else:
+                                        download_finished_ref[0] = "failed"
+                                        log("========== DOWNLOAD FAILED ==========")
+                                except Exception as e:
+                                    download_proc_ref.clear()
+                                    download_finished_ref[0] = "failed"
+                                    if not isinstance(e, _TargetClosedError):
+                                        log(f"download_error {e!r}")
+
+                            threading.Thread(target=run_download, daemon=True).start()
+                        else:
+                            set_download_button_state("no_url")
+                            log("========== NO STREAM URL (auto) ==========")
                     current_url = page.url
                     if any(dom in current_url for dom in BLOCKED_REDIRECT_DOMAINS):
                         log("blocked_ad_navigation going_back")
@@ -1313,6 +1396,33 @@ def run_visual_mode(page_url: str) -> None:
                         log("overlay_closed")
                         timeline("overlay_closed")
                         page.wait_for_timeout(500)
+                    on_player_page = current_url != page_url
+                    if not on_player_page:
+                        try:
+                            if page.query_selector("iframe[src*='supremejav'], iframe[src*='dianaavoidthey'], iframe[src*='turbovid']"):
+                                on_player_page = True
+                        except Exception:
+                            pass
+                    if not target_stream_seen_ref[0] and on_player_page:
+                        auto_click_iters[0] += 1
+                        if auto_click_iters[0] >= 5:
+                            auto_click_iters[0] = 0
+                            log("auto_click_player: attempt (on_player_page=True, target_not_seen)")
+                            print("[AUTO_CLICK] attempt (clicking player to start playback)", file=sys.stderr)
+                            sys.stderr.flush()
+                            for _ in range(3):
+                                try_close_ad_overlay(page)
+                                page.wait_for_timeout(300)
+                            if try_click_player(page):
+                                timeline("auto_click_player")
+                                log("auto_click_player: clicked to start playback")
+                                print("[AUTO_CLICK] OK — clicked to start playback", file=sys.stderr)
+                                sys.stderr.flush()
+                            else:
+                                log("auto_click_player: no click (player element not found or not visible)")
+                                print("[AUTO_CLICK] FAIL — no click (player not found or not visible)", file=sys.stderr)
+                                sys.stderr.flush()
+                            page.wait_for_timeout(500)
                 except Exception as e:
                     log(f"loop_error {e!r}")
                     if isinstance(e, _TargetClosedError) or "closed" in str(e).lower():
@@ -1473,10 +1583,16 @@ def main() -> int:
         action="store_true",
         help="Open page in visible browser; log stream URLs when you click (Enter to close)",
     )
+    parser.add_argument(
+        "--no-auto-download",
+        action="store_true",
+        dest="no_auto_download",
+        help="With --visual: do not start download automatically when target link appears",
+    )
     args = parser.parse_args()
 
     if args.visual:
-        run_visual_mode(args.url)
+        run_visual_mode(args.url, auto_download=not getattr(args, "no_auto_download", False))
         return 0
 
     try:

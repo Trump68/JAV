@@ -13,6 +13,7 @@ env/
 .visual_mode.log
 .player_center.json
 last_download_url.txt
+stream_discovery_timeline.txt
 video.*
 *.ytdl
 download/
