@@ -1485,6 +1485,11 @@ def run_visual_mode(
                         wait_for_player_page_loaded(page)
                         timeline("player_page_loaded")
                         try:
+                            page.evaluate("window.scrollTo(0, 0); document.documentElement.scrollTop = 0; document.body.scrollTop = 0;")
+                            page.wait_for_timeout(300)
+                        except Exception:
+                            pass
+                        try:
                             for i, frame in enumerate(page.frames):
                                 try:
                                     frame.evaluate(DOWNLOAD_BUTTON_SCRIPT)
@@ -1574,39 +1579,44 @@ def run_visual_mode(
                     if not target_stream_seen_ref[0] and on_player_page:
                         auto_click_iters[0] += 1
                         if server_tab == "VOE" and not voe_click_loop_done_ref[0]:
-                            # VOE: keep clicking player until stream appears; check each iteration — if link ready, break and download
+                            # VOE: pattern — in loop do 2 clicks with 0.1s between them, then wait 2s; on each step check if stream appeared
                             voe_click_loop_done_ref[0] = True
-                            _visual_log("auto_click_player: VOE — clicking until stream appears")
-                            for attempt in range(50):  # max ~2.5 min
+                            _visual_log("auto_click_player: VOE — scroll up then 2-click pattern until stream appears (timeout ~60s)")
+                            try:
+                                page.evaluate("window.scrollTo(0, 0); document.documentElement.scrollTop = 0; document.body.scrollTop = 0;")
+                                page.wait_for_timeout(400)
+                            except Exception:
+                                pass
+                            for attempt in range(30):  # ~30 * (2s + small overhead) ≈ 60 seconds
                                 if target_stream_seen_ref[0] or stream_url_for_download[0]:
                                     _visual_log("auto_click_player: VOE — stream link available, breaking to start download")
                                     if stream_url_for_download[0] and not auto_download_pending_ref[0]:
                                         auto_download_pending_ref[0] = True
                                     break
+                                # keep overlays clean before each click burst
                                 for _ in range(2):
                                     try_close_ad_overlay(page)
-                                    page.wait_for_timeout(300)
-                                if try_click_player(page):
-                                    timeline("auto_click_player_voe")
-                                    _visual_log(f"auto_click_player: VOE click #{attempt + 1}")
-                                page.wait_for_timeout(100)  # 0.1 sec between clicks
+                                    page.wait_for_timeout(150)
+                                # two clicks with 0.1s interval
+                                for click_idx in range(2):
+                                    if try_click_player(page):
+                                        timeline("auto_click_player_voe")
+                                        _visual_log(f"auto_click_player: VOE click burst #{attempt + 1} click {click_idx + 1}")
+                                    page.wait_for_timeout(100)  # 0.1 sec between clicks
+                                    if target_stream_seen_ref[0] or stream_url_for_download[0]:
+                                        break
+                                if target_stream_seen_ref[0] or stream_url_for_download[0]:
+                                    _visual_log("auto_click_player: VOE — stream detected after click burst")
+                                    if stream_url_for_download[0] and not auto_download_pending_ref[0]:
+                                        auto_download_pending_ref[0] = True
+                                    break
+                                # wait 2 seconds before next burst
+                                page.wait_for_timeout(2_000)
+                            # timeout: no stream/link within ~60 seconds — stop visual loop with error (exit code 1)
                             if not target_stream_seen_ref[0] and not stream_url_for_download[0]:
-                                page.wait_for_timeout(5_000)
-                                try:
-                                    btn = page.locator("#jav-download-trigger").first
-                                    if btn.is_visible(timeout=1000):
-                                        btn.click(force=True)
-                                        timeline("auto_click_download_button")
-                                        _visual_log("auto_click: Download button clicked (no stream)")
-                                        download_url = stream_url_for_download[0]
-                                        if download_url:
-                                            try:
-                                                LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
-                                                _visual_log(f"download_link_saved: {download_url[:100]}...")
-                                            except Exception:
-                                                pass
-                                except Exception:
-                                    pass
+                                _visual_log("auto_click_player: VOE — timeout 60s, no stream found, stopping with error")
+                                log("VOE: no stream detected within 60 seconds; stopping with error.")
+                                stop_event.set()
                         elif server_tab != "VOE" and auto_click_iters[0] >= 5:
                             # TV / ST: fixed pattern (every 5 iters)
                             auto_click_iters[0] = 0

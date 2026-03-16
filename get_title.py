@@ -134,8 +134,8 @@ def main() -> int:
     out_file.write_text(f"{title}\n{code}\n{cast}\n", encoding="utf-8")
     print(title)
     print(f"Saved: {out_file}", file=sys.stderr)
-    # Save cover image as download/{CODE}/{CODE}.jpg
-    cover_path = code_dir / f"{code}.jpg"
+    # Save cover image as download/{CODE}/POSTER.jpg
+    cover_path = code_dir / "POSTER.jpg"
     if not cover_url and code != "unknown":
         # Fallback: URL like https://img.supjav.com/images/2025/12/rbd812pl.jpg
         code_plain = code.replace("-", "").lower()
