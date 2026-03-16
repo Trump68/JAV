@@ -17,11 +17,46 @@ Utility for Supjav:
 
 import argparse
 import re
+import sqlite3
 import subprocess
 import sys
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
+
+# SQLite DB in project root for tracking downloaded films (slug + type + upload_date)
+def _db_path() -> Path:
+    return Path(__file__).resolve().parent / "downloads.db"
+
+
+def _init_db(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS downloads (
+            slug TEXT NOT NULL,
+            type TEXT NOT NULL,
+            upload_date TEXT NOT NULL,
+            url TEXT,
+            labels TEXT,
+            PRIMARY KEY (slug, type, upload_date)
+        )"""
+    )
+    conn.commit()
+
+
+def _already_downloaded(conn: sqlite3.Connection, slug: str, type_str: str, upload_date: str) -> bool:
+    cur = conn.execute(
+        "SELECT 1 FROM downloads WHERE slug = ? AND type = ? AND upload_date = ?",
+        (slug, type_str, upload_date),
+    )
+    return cur.fetchone() is not None
+
+
+def _save_download(conn: sqlite3.Connection, slug: str, type_str: str, upload_date: str, url: str, labels: str) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO downloads (slug, type, upload_date, url, labels) VALUES (?, ?, ?, ?, ?)",
+        (slug, type_str, upload_date, url, labels),
+    )
+    conn.commit()
 
 from playwright.sync_api import sync_playwright
 
@@ -285,11 +320,11 @@ def main() -> int:
 
     if args.process_list:
         # Process-list mode: run downloads for entries in LIST.TXT under given actress slug
-        slug = args.process_list.strip()
-        if not slug:
+        cast_slug = args.process_list.strip()
+        if not cast_slug:
             print("Invalid CAST_SLUG for --process-list.", file=sys.stderr)
             return 1
-        cast_dir = DOWNLOAD_DIR / slug
+        cast_dir = DOWNLOAD_DIR / cast_slug
         list_path = cast_dir / "LIST.TXT"
         if not list_path.exists():
             print(f"LIST.TXT not found: {list_path}", file=sys.stderr)
@@ -300,7 +335,14 @@ def main() -> int:
             return 1
         script_dir = Path(__file__).resolve().parent
         dodnld_py = script_dir / "dodnld.py"
+        db_path = _db_path()
+        conn = sqlite3.connect(str(db_path))
+        try:
+            _init_db(conn)
+        finally:
+            pass
         total = 0
+        skipped = 0
         for idx, line in enumerate(lines, start=1):
             parts = [p.strip() for p in line.split(",", 3)]
             if len(parts) < 4:
@@ -310,18 +352,28 @@ def main() -> int:
                 continue
             if "reducing mosaic" not in labels.lower():
                 continue
+            type_str = "Reducing Mosaic"
+            if _already_downloaded(conn, code, type_str, date):
+                print(f"[PROCESS] {idx}: skip (already in DB) {code} {date}", file=sys.stderr)
+                skipped += 1
+                continue
             total += 1
-            # Choose filename based on Reducing Mosaic label
+            # Folder name: CODE UNC [DATE]
+            date_str = date or ""
+            folder_name = f"{code} UNC [{date_str}]" if date_str else f"{code} UNC"
             filename = f"{code}_UNCENSORED.m4v"
-            output_path_arg = f"{slug}/{code}/{filename}"
+            output_path_arg = f"{cast_slug}/{folder_name}/{filename}"
             print(f"[PROCESS] {idx}: {url} -> {output_path_arg}", file=sys.stderr)
             proc = subprocess.run(
                 [sys.executable, str(dodnld_py), url, "--visual", "-o", output_path_arg],
                 cwd=str(script_dir),
             )
-            if proc.returncode != 0:
+            if proc.returncode == 0:
+                _save_download(conn, code, type_str, date, url, labels)
+            else:
                 print(f"[PROCESS] Failed (exit {proc.returncode}) for {url}", file=sys.stderr)
-        print(f"[PROCESS] Completed. Started downloads for {total} entries from {list_path}", file=sys.stderr)
+        conn.close()
+        print(f"[PROCESS] Completed. Started {total} downloads, skipped {skipped} (already in DB). List: {list_path}", file=sys.stderr)
         return 0
 
     if args.cast_list:
