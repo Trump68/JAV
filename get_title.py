@@ -369,7 +369,20 @@ def main() -> int:
                 cwd=str(script_dir),
             )
             if proc.returncode == 0:
+                # Save DB record
                 _save_download(conn, code, type_str, date, url, labels)
+                # Save POSTER.jpg into the same folder (inside actress folder)
+                try:
+                    folder_dir = DOWNLOAD_DIR / cast_slug / folder_name
+                    folder_dir.mkdir(parents=True, exist_ok=True)
+                    poster_path = folder_dir / "POSTER.jpg"
+                    if not poster_path.exists():
+                        title2, code2, cast2, cover_url = get_video_title(url)
+                        if cover_url:
+                            if save_cover_image(cover_url, poster_path):
+                                print(f"[PROCESS] Saved poster: {poster_path}", file=sys.stderr)
+                except Exception as poster_err:
+                    print(f"[PROCESS] Could not save poster for {url}: {poster_err!r}", file=sys.stderr)
             else:
                 print(f"[PROCESS] Failed (exit {proc.returncode}) for {url}", file=sys.stderr)
         conn.close()
