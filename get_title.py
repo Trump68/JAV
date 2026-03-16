@@ -148,30 +148,45 @@ def save_cover_image(url: str, path: Path) -> bool:
         return False
 
 
-def collect_cast_list(page_url: str) -> list[tuple[str, str, str, str]]:
-    """Walk all pages of a cast listing and collect (url, code_slug, upload_date, labels).
-
-    Logs each processed item and pagination jump to stdout/stderr so progress is visible in terminal.
+def _cast_base_url(page_url: str) -> str | None:
+    """From cast URL (with or without /page/N) return base URL for page 1.
+    E.g. https://supjav.com/category/cast/kasumi-risa/page/2 -> https://supjav.com/category/cast/kasumi-risa
     """
     page_url = page_url.strip()
     if not page_url.startswith(("http://", "https://")):
+        return None
+    parsed = urlparse(page_url)
+    path = (parsed.path or "").rstrip("/")
+    # Strip /page/N from the end
+    if "/page/" in path:
+        path = path[: path.index("/page/")]
+    return f"{parsed.scheme}://{parsed.netloc}{path}" if path else None
+
+
+def collect_cast_list(page_url: str, *, headless: bool = True) -> list[tuple[str, str, str, str]]:
+    """Walk all pages of a cast listing: first base URL (page 1), then /page/2, /page/3, ...
+    Collect (url, code_slug, upload_date, labels). Stops when a page returns no items.
+
+    Logs each processed item and pagination to stderr.
+    headless: if False, browser window is visible (visual mode).
+    """
+    base_url = _cast_base_url(page_url)
+    if not base_url:
         return []
-    results: list[tuple[str, str, str]] = []
+    results: list[tuple[str, str, str, str]] = []
+    seen_items: set[str] = set()
     with sync_playwright() as p:
-        browser = launch_browser(p, headless=True)
+        browser = launch_browser(p, headless=headless)
         try:
             context = new_stealth_context(browser)
             page = context.new_page()
-            current_url = page_url
-            seen_urls: set[str] = set()
-            seen_items: set[str] = set()  # movie URLs we've already recorded
-            while current_url and current_url not in seen_urls:
-                seen_urls.add(current_url)
+            page_num = 1
+            while True:
+                current_url = f"{base_url}/page/{page_num}" if page_num > 1 else base_url
                 print(f"[CAST] Page: {current_url}", file=sys.stderr)
                 try:
                     page.goto(current_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
                 except Exception as nav_err:
-                    # Network / DNS / Cloudflare error on this page: log and stop pagination gracefully
                     print(f"[CAST] Page navigation error, stopping: {nav_err!r}", file=sys.stderr)
                     break
                 wait_for_cloudflare_pass(page)
@@ -259,36 +274,11 @@ def collect_cast_list(page_url: str) -> list[tuple[str, str, str, str]]:
                         results.append((url, title, date, labels_str))
                         seen_items.add(url)
                         print(f"[CAST] Item: {url} | {title} | {date} | {labels_str}", file=sys.stderr)
-                # Find next-page link
-                next_url = page.evaluate(
-                    """() => {
-                    function abs(href) {
-                        try { return new URL(href, document.location.href).href; } catch (e) { return null; }
-                    }
-                    const containers = document.querySelectorAll(
-                        '.pagination, .wp-pagenavi, .nav-links, .page-navi, .paging'
-                    );
-                    const links = [];
-                    containers.forEach(c => c.querySelectorAll('a').forEach(a => links.push(a)));
-                    if (!links.length) {
-                        document.querySelectorAll('a').forEach(a => links.push(a));
-                    }
-                    let candidate = null;
-                    links.forEach(a => {
-                        if (candidate) return;
-                        const t = (a.textContent || '').trim().toLowerCase();
-                        if (t === '»' || t === 'next' || t === '>' || t === '>>') {
-                            candidate = abs(a.getAttribute('href'));
-                        }
-                    });
-                    return candidate || null;
-                }"""
-                )
-                next_url = next_url if isinstance(next_url, str) else None
-                if not next_url or next_url in seen_urls:
+                # Next page: base/page/2, base/page/3, ...; stop when no items
+                if not (isinstance(items, list) and len(items) > 0):
+                    print(f"[CAST] No items on page {page_num}, stopping.", file=sys.stderr)
                     break
-                print(f"[CAST] Next page: {next_url}", file=sys.stderr)
-                current_url = next_url
+                page_num += 1
         finally:
             browser.close()
     return results
@@ -317,7 +307,21 @@ def main() -> int:
         metavar="CAST_SLUG",
         help="Process existing download/{CAST_SLUG}/LIST.TXT: for each 'Reducing Mosaic' entry call dodnld.py to download into that actress folder.",
     )
+    parser.add_argument(
+        "--visual",
+        "-v",
+        action="store_true",
+        default=True,
+        help="Call dodnld.py with --visual (browser window). Default.",
+    )
+    parser.add_argument(
+        "--no-visual",
+        action="store_true",
+        dest="no_visual",
+        help="Call dodnld.py in headless mode (no browser window).",
+    )
     args = parser.parse_args()
+    use_visual = args.visual and not getattr(args, "no_visual", False)
 
     if args.process_list:
         # Process-list mode: run downloads for entries in LIST.TXT under given actress slug
@@ -365,10 +369,10 @@ def main() -> int:
             filename = f"{code}_UNCENSORED.m4v"
             output_path_arg = f"{cast_slug}/{folder_name}/{filename}"
             print(f"[PROCESS] {idx}: {url} -> {output_path_arg}", file=sys.stderr)
-            proc = subprocess.run(
-                [sys.executable, str(dodnld_py), url, "--visual", "-o", output_path_arg],
-                cwd=str(script_dir),
-            )
+            dodnld_cmd = [sys.executable, str(dodnld_py), url, "-o", output_path_arg]
+            if use_visual:
+                dodnld_cmd.insert(-2, "--visual")
+            proc = subprocess.run(dodnld_cmd, cwd=str(script_dir))
             if proc.returncode == 0:
                 # Save DB record
                 _save_download(conn, code, type_str, date, url, labels)
@@ -399,7 +403,7 @@ def main() -> int:
 
     if args.cast_list:
         # Cast-list mode: build LIST.TXT under download/{CAST_SLUG}/
-        cast_items = collect_cast_list(args.url)
+        cast_items = collect_cast_list(args.url, headless=not use_visual)
         if not cast_items:
             print("No items found on cast page or failed to parse.", file=sys.stderr)
             return 1
@@ -422,10 +426,10 @@ def main() -> int:
     dodnld_py = script_dir / "dodnld.py"
     # Save video to download/{CODE}/{filename}; wait for dodnld to finish
     output_path_arg = f"{code}/{output_name}"
-    proc = subprocess.run(
-        [sys.executable, str(dodnld_py), args.url, "--visual", "-o", output_path_arg],
-        cwd=str(script_dir),
-    )
+    dodnld_cmd = [sys.executable, str(dodnld_py), args.url, "-o", output_path_arg]
+    if use_visual:
+        dodnld_cmd.insert(-2, "--visual")
+    proc = subprocess.run(dodnld_cmd, cwd=str(script_dir))
     code_dir = DOWNLOAD_DIR / code
     code_dir.mkdir(parents=True, exist_ok=True)
     out_file = code_dir / f"{code}.txt"
