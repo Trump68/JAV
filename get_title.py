@@ -1,6 +1,7 @@
 """
-Get title/code/cast, call dodnld.py, wait 10 sec, then save to download/{CODE}/{CODE}.txt
+Get title/code/cast, call dodnld.py and wait for it to finish, then save to download/{CODE}/{CODE}.txt
 and cover image as download/{CODE}/{CODE}.jpg; video saved to download/{CODE}/ by dodnld.
+Returns same exit code as dodnld.py: 0 on success, 1 on failure.
 Usage: python get_title.py [URL]
 File: line 1 = title, line 2 = code (e.g. IPZ-590), line 3 = cast.
 """
@@ -9,7 +10,6 @@ import argparse
 import re
 import subprocess
 import sys
-import time
 import urllib.request
 from pathlib import Path
 
@@ -23,13 +23,13 @@ from dodnld import (
     wait_for_cloudflare_pass,
 )
 
-PAGE_TIMEOUT_MS = 30_000
-# JAV code pattern: 2–5 letters, hyphen, digits (e.g. IPZ-590, ABP-123)
+PAGE_TIMEOUT_MS = 60_000
+# JAV code pattern: 2–5 letters, hyphen, digits (e.g. IPZ-590, IPZZ-621, ABP-123)
 CODE_PATTERN = re.compile(r"[A-Z]{2,5}-\d+", re.IGNORECASE)
 
 
 def extract_code_from_title(title: str) -> str | None:
-    """Extract code like IPZ-590 from title. Returns first match or None."""
+    """Extract code like IPZ-590 or IPZZ-621 from title. Returns first match (hyphen required)."""
     m = CODE_PATTERN.search(title)
     return m.group(0).upper() if m else None
 
@@ -104,7 +104,7 @@ def save_cover_image(url: str, path: Path) -> bool:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Get title/code/cast, call dodnld.py, wait 10 sec, save to download/{CODE}/."
+        description="Get title/code/cast, call dodnld.py and wait for completion, save to download/{CODE}/. Exit 0 on success, 1 on failure."
     )
     parser.add_argument(
         "url",
@@ -122,14 +122,12 @@ def main() -> int:
     output_name = f"{code}_UNCENSORED.m4v" if is_reducing_mosaic else f"{code}.m4v"
     script_dir = Path(__file__).resolve().parent
     dodnld_py = script_dir / "dodnld.py"
-    # Save video to download/{CODE}/{filename}
+    # Save video to download/{CODE}/{filename}; wait for dodnld to finish
     output_path_arg = f"{code}/{output_name}"
-    subprocess.Popen(
+    proc = subprocess.run(
         [sys.executable, str(dodnld_py), args.url, "--visual", "-o", output_path_arg],
         cwd=str(script_dir),
     )
-    print("dodnld.py started, waiting 10 sec...", file=sys.stderr)
-    time.sleep(10)
     code_dir = DOWNLOAD_DIR / code
     code_dir.mkdir(parents=True, exist_ok=True)
     out_file = code_dir / f"{code}.txt"
@@ -147,7 +145,7 @@ def main() -> int:
             print(f"Saved cover: {cover_path}", file=sys.stderr)
         else:
             print(f"Could not download cover: {cover_url}", file=sys.stderr)
-    return 0
+    return 0 if proc.returncode == 0 else 1
 
 
 if __name__ == "__main__":

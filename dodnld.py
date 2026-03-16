@@ -26,7 +26,7 @@ except ImportError:
     _TargetClosedError = type("TargetClosedError", (Exception,), {})
 
 DEFAULT_URL = "https://supjav.com/403831.html"
-PAGE_TIMEOUT_MS = 30_000
+PAGE_TIMEOUT_MS = 60_000
 PLAYER_TIMEOUT_MS = 15_000
 
 USER_AGENT = (
@@ -452,62 +452,89 @@ def get_jw_video_blob_info(page) -> dict | None:
         return None
 
 
+# Only click inside these iframes (player), never in ad/other iframes — avoids opening ads on 2nd/3rd click
+PLAYER_IFRAME_SRC_SUBSTRINGS = (
+    "supremejav",
+    "turbovid",
+    "doppio",
+    "voe.sx",
+    "dianaavoidthey",
+    "supjav.com",  # same-origin player
+)
+
+
+def _frame_is_player_iframe(frame) -> bool:
+    """True if frame is an iframe with player src (not ad). Main frame is excluded — player is in iframe."""
+    if frame == frame.page.main_frame:
+        return False
+    try:
+        el = frame.frame_element()
+        src = (el.get_attribute("src") or "").lower()
+        return any(s in src for s in PLAYER_IFRAME_SRC_SUBSTRINGS)
+    except Exception:
+        return False
+
+
 def try_click_player(page) -> bool:
-    """Click video or play/center in any player iframe — same logic for VOE, ST, TV, FST."""
+    """Click only the player: <video> or center of player iframe. Avoids clicking ad or wrong elements."""
     try:
         try:
-            page.wait_for_selector("iframe[src*='supremejav'], iframe[src*='doppio'], iframe[src^='http']", timeout=3000)
+            page.wait_for_selector("iframe[src*='supremejav'], iframe[src*='doppio'], iframe[src^='http']", timeout=2000)
         except Exception:
             pass
-        # 1) <video> in any frame
+        # 1) <video> in player iframes — this is the actual player
         for frame in page.frames:
+            if not _frame_is_player_iframe(frame):
+                continue
             try:
                 video = frame.locator("video").first
-                if video.is_visible(timeout=1500):
-                    video.click(force=True, timeout=1500)
+                if video.is_visible(timeout=800):
+                    video.click(force=True, timeout=800)
                     return True
             except Exception:
                 pass
+        # 2) Center of player iframe only (main video area) — largest player iframe first
         try:
-            video = page.locator("video").first
-            if video.is_visible(timeout=500):
-                video.click(force=True, timeout=500)
-                return True
+            player_iframes = []
+            for iframe_el in page.query_selector_all("iframe"):
+                try:
+                    src = (iframe_el.get_attribute("src") or "").lower()
+                    if not any(s in src for s in PLAYER_IFRAME_SRC_SUBSTRINGS):
+                        continue
+                    box = iframe_el.bounding_box()
+                    if not box or box.get("width", 0) < 200 or box.get("height", 0) < 150:
+                        continue
+                    player_iframes.append((iframe_el, box["width"] * box["height"]))
+                except Exception:
+                    continue
+            player_iframes.sort(key=lambda x: -x[1])  # largest first
+            for iframe_el, _ in player_iframes:
+                try:
+                    box = iframe_el.bounding_box()
+                    if box:
+                        cx = box["x"] + box["width"] / 2
+                        cy = box["y"] + box["height"] / 2
+                        page.mouse.click(cx, cy)
+                        return True
+                except Exception:
+                    continue
         except Exception:
             pass
-        # 2) In every iframe (like VOE): try play button, then body, then center of iframe
+        # 3) Play button only (no generic button/body) inside player iframes
         for frame in page.frames:
-            if frame == page.main_frame:
+            if frame == page.main_frame or not _frame_is_player_iframe(frame):
                 continue
             try:
-                for sel in ["[class*='play'][class*='button']", "[class*='big-play']", "[aria-label*='lay']", "button", "body"]:
+                for sel in ["[class*='play'][class*='button']", "[class*='big-play']", "[aria-label*='lay']", "[class*='jwplay']"]:
                     try:
                         el = frame.locator(sel).first
-                        if el.is_visible(timeout=600):
-                            el.click(force=True, timeout=600)
+                        if el.is_visible(timeout=400):
+                            el.click(force=True, timeout=400)
                             return True
                     except Exception:
                         pass
             except Exception:
                 pass
-        # 3) Center of any large iframe (player-sized; same as VOE)
-        try:
-            for iframe_el in page.query_selector_all("iframe"):
-                try:
-                    frame = iframe_el.content_frame()
-                    if not frame:
-                        continue
-                    box = iframe_el.bounding_box()
-                    if not box or box.get("width", 0) < 200 or box.get("height", 0) < 150:
-                        continue
-                    cx = box["x"] + box["width"] / 2
-                    cy = box["y"] + box["height"] / 2
-                    page.mouse.click(cx, cy)
-                    return True
-                except Exception:
-                    continue
-        except Exception:
-            pass
     except Exception:
         pass
     return False
@@ -693,7 +720,7 @@ def extract_stream_urls(page_url: str, server_tabs: list[str] | None = None, for
 
             page.on("response", on_response)
 
-            page.goto(page_url, wait_until="load", timeout=PAGE_TIMEOUT_MS)
+            page.goto(page_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
             wait_for_cloudflare_pass(page)
             page.wait_for_timeout(1500)
             dismiss_ad_overlays(page)
@@ -893,10 +920,10 @@ def extract_m3u8_from_player_page(player_url: str, referer: str = "https://supja
         browser = launch_browser(p, headless=True)
         try:
             context = new_stealth_context(browser, extra_http_headers={"Referer": referer})
-            context.set_default_timeout(30_000)
+            context.set_default_timeout(PAGE_TIMEOUT_MS)
             page = context.new_page()
             page.on("response", on_response)
-            page.goto(player_url, wait_until="load", timeout=30_000)
+            page.goto(player_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
             page.wait_for_timeout(2000)
             # Click in player to start playback (video or body)
             try:
@@ -968,8 +995,8 @@ def run_visual_mode(
     auto_download: bool = True,
     output_filename: str = "video.m4v",
     server_tab: str = "VOE",
-) -> None:
-    """Open page in visible browser; click server_tab (VOE, ST, etc.) then dismiss ads. Same logic for any tab."""
+) -> bool:
+    """Open page in visible browser; click server_tab (VOE, ST, etc.) then dismiss ads. Returns True if download succeeded (done/stopped), False otherwise."""
     # When saving to a subdir (e.g. download/CODE/file.m4v), do not wipe download/; only ensure target dir exists
     if "/" not in output_filename and "\\" not in output_filename:
         if DOWNLOAD_DIR.exists():
@@ -980,6 +1007,7 @@ def run_visual_mode(
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     out_path = DOWNLOAD_DIR / output_filename
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    visual_download_success: list = [False]
     user_data_dir = Path(__file__).resolve().parent / ".playwright_profile"
     user_data_dir.mkdir(exist_ok=True)
     with sync_playwright() as p:
@@ -1165,7 +1193,7 @@ def run_visual_mode(
                     sys.stdout.flush()
 
             page.on("response", on_response)
-            page.goto(page_url, wait_until="load", timeout=PAGE_TIMEOUT_MS)
+            page.goto(page_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
             timeline("page_loaded")
             log("cloudflare_wait_start")
             wait_for_cloudflare_pass(page)
@@ -1195,35 +1223,11 @@ def run_visual_mode(
                             try_close_ad_overlay(page)
                             page.wait_for_timeout(200)
                     _tab_label_esc = re.escape(try_tab)
-                    # Only click a.btn-server with exact text (VOE, ST, etc.) — never get_by_text/link (can hit ad overlay)
-                    try:
-                        btn = page.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
-                        if btn.is_visible(timeout=3000):
-                            btn.scroll_into_view_if_needed()
-                            page.wait_for_timeout(200)
-                            tab_clicked = (_click_center(page, btn) or btn.click(force=True)) if try_tab == "ST" else btn.click(force=True)
-                    except Exception:
-                        pass
-                    if not tab_clicked:
-                        for frame in page.frames:
-                            try:
-                                btn = frame.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
-                                if btn.is_visible(timeout=2000):
-                                    btn.scroll_into_view_if_needed()
-                                    page.wait_for_timeout(200)
-                                    if try_tab == "ST":
-                                        tab_clicked = _click_center(page, btn) or btn.click(force=True)
-                                    else:
-                                        tab_clicked = btn.click(force=True)
-                                    if tab_clicked:
-                                        break
-                            except Exception:
-                                pass
-                    if not tab_clicked:
-                        _label_esc_js = try_tab.replace("\\", "\\\\").replace("'", "\\'")
-                        _click_tab_js = f"""() => {{
+                    # Build JS that clicks only a.btn-server with safe href (no ad domains) — use this FIRST for VOE/TV to avoid opening ads
+                    _label_esc_js = try_tab.replace("\\", "\\\\").replace("'", "\\'")
+                    _click_tab_js = f"""() => {{
                             var label = '{_label_esc_js}';
-                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com/i;
+                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com|goldensacam|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
                             var btns = document.querySelectorAll('a.btn-server');
                             for (var i = 0; i < btns.length; i++) {{
                                 var a = btns[i];
@@ -1253,6 +1257,47 @@ def run_visual_mode(
                             }});
                             return !!server;
                         }}"""
+                    # For VOE and TV: try safe JS click first (skips ad hrefs), so we don't open ads site
+                    if try_tab in ("VOE", "TV"):
+                        tab_clicked = page.evaluate(_click_tab_js)
+                        if not tab_clicked:
+                            for frame in page.frames:
+                                if frame == page.main_frame:
+                                    continue
+                                try:
+                                    if frame.evaluate(_click_tab_js):
+                                        tab_clicked = True
+                                        break
+                                except Exception:
+                                    pass
+                        if tab_clicked:
+                            page.wait_for_timeout(400)
+                    # Only if safe click failed: try Playwright locator (may hit ad if multiple VOE links)
+                    if not tab_clicked:
+                        try:
+                            btn = page.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
+                            if btn.is_visible(timeout=3000):
+                                btn.scroll_into_view_if_needed()
+                                page.wait_for_timeout(200)
+                                tab_clicked = (_click_center(page, btn) or btn.click(force=True)) if try_tab == "ST" else btn.click(force=True)
+                        except Exception:
+                            pass
+                    if not tab_clicked:
+                        for frame in page.frames:
+                            try:
+                                btn = frame.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
+                                if btn.is_visible(timeout=2000):
+                                    btn.scroll_into_view_if_needed()
+                                    page.wait_for_timeout(200)
+                                    if try_tab == "ST":
+                                        tab_clicked = _click_center(page, btn) or btn.click(force=True)
+                                    else:
+                                        tab_clicked = btn.click(force=True)
+                                    if tab_clicked:
+                                        break
+                            except Exception:
+                                pass
+                    if not tab_clicked:
                         tab_clicked = page.evaluate(_click_tab_js)
                         if not tab_clicked:
                             for frame in page.frames:
@@ -1323,10 +1368,12 @@ def run_visual_mode(
             last_waited_url = page.url
             _key_check_iters = [0]
             auto_click_iters = [0]
+            voe_click_loop_done_ref = [False]  # VOE: run "click until stream" loop only once
             download_proc_ref: list = []
             stopped_by_user_ref: list = [False]
             download_progress_text_ref: list = [None]
             download_finished_ref: list = [None]
+            download_thread_ref: list = [None]
             auto_download_pending_ref: list = [False]
 
             def progress_from_download_thread(text: str):
@@ -1346,7 +1393,7 @@ def run_visual_mode(
                         log(f"Download state: {download_finished_ref[0]}.")
                         download_finished_ref[0] = None
                         download_progress_text_ref[0] = None
-                    if download_proc_ref and page.evaluate("() => !!window.__userStopDownload"):
+                    if download_proc_ref and page.evaluate("() => !!(window.__userStopDownload || (window.top && window.top.__userStopDownload))"):
                         try:
                             stopped_by_user_ref[0] = True
                             download_proc_ref[0].kill()
@@ -1354,7 +1401,7 @@ def run_visual_mode(
                         except Exception:
                             pass
                         download_proc_ref.clear()
-                        page.evaluate("() => { window.__userStopDownload = false; }")
+                        page.evaluate("() => { try { window.__userStopDownload = false; if (window.top) window.top.__userStopDownload = false; } catch(e){} }")
                         set_download_button_state("stopped")
                         log("Download stopped (saved).")
                     if auto_download_pending_ref[0]:
@@ -1398,7 +1445,9 @@ def run_visual_mode(
                                     if not isinstance(e, _TargetClosedError):
                                         _visual_log(f"download_error: {e!r}")
 
-                            threading.Thread(target=run_download, daemon=True).start()
+                            t = threading.Thread(target=run_download, daemon=True)
+                            download_thread_ref[0] = t
+                            t.start()
                             browser_closed_ref[0] = True
                             try:
                                 context.close()
@@ -1494,7 +1543,9 @@ def run_visual_mode(
                                     if not isinstance(e, _TargetClosedError):
                                         _visual_log(f"download_error: {e!r}")
 
-                            threading.Thread(target=run_download, daemon=True).start()
+                            t = threading.Thread(target=run_download, daemon=True)
+                            download_thread_ref[0] = t
+                            t.start()
                             browser_closed_ref[0] = True
                             try:
                                 context.close()
@@ -1517,7 +1568,42 @@ def run_visual_mode(
                             pass
                     if not target_stream_seen_ref[0] and on_player_page:
                         auto_click_iters[0] += 1
-                        if auto_click_iters[0] >= 5:
+                        if server_tab == "VOE" and not voe_click_loop_done_ref[0]:
+                            # VOE: keep clicking player until stream appears; check each iteration — if link ready, break and download
+                            voe_click_loop_done_ref[0] = True
+                            _visual_log("auto_click_player: VOE — clicking until stream appears")
+                            for attempt in range(50):  # max ~2.5 min
+                                if target_stream_seen_ref[0] or stream_url_for_download[0]:
+                                    _visual_log("auto_click_player: VOE — stream link available, breaking to start download")
+                                    if stream_url_for_download[0] and not auto_download_pending_ref[0]:
+                                        auto_download_pending_ref[0] = True
+                                    break
+                                for _ in range(2):
+                                    try_close_ad_overlay(page)
+                                    page.wait_for_timeout(300)
+                                if try_click_player(page):
+                                    timeline("auto_click_player_voe")
+                                    _visual_log(f"auto_click_player: VOE click #{attempt + 1}")
+                                page.wait_for_timeout(100)  # 0.1 sec between clicks
+                            if not target_stream_seen_ref[0] and not stream_url_for_download[0]:
+                                page.wait_for_timeout(5_000)
+                                try:
+                                    btn = page.locator("#jav-download-trigger").first
+                                    if btn.is_visible(timeout=1000):
+                                        btn.click(force=True)
+                                        timeline("auto_click_download_button")
+                                        _visual_log("auto_click: Download button clicked (no stream)")
+                                        download_url = stream_url_for_download[0]
+                                        if download_url:
+                                            try:
+                                                LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
+                                                _visual_log(f"download_link_saved: {download_url[:100]}...")
+                                            except Exception:
+                                                pass
+                                except Exception:
+                                    pass
+                        elif server_tab != "VOE" and auto_click_iters[0] >= 5:
+                            # TV / ST: fixed pattern (every 5 iters)
                             auto_click_iters[0] = 0
                             _visual_log("auto_click_player: attempt")
                             for _ in range(3):
@@ -1573,6 +1659,9 @@ def run_visual_mode(
                 except Exception:
                     pass
                 log("Done.")
+            if download_thread_ref[0]:
+                download_thread_ref[0].join(timeout=3700)
+            visual_download_success[0] = download_finished_ref[0] in ("done", "stopped")
         finally:
             browser_closed_ref[0] = True
             if context is not None:
@@ -1580,6 +1669,7 @@ def run_visual_mode(
                     context.close()
                 except BaseException:
                     pass
+    return visual_download_success[0]
 
 
 def _parse_ytdlp_progress(line: str) -> str | None:
@@ -1749,13 +1839,13 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.visual:
-        run_visual_mode(
+        ok = run_visual_mode(
             args.url,
             auto_download=not getattr(args, "no_auto_download", False),
             output_filename=args.output,
             server_tab=args.server_tab,
         )
-        return 0
+        return 0 if ok else 1
 
     try:
         urls, video_code = extract_stream_urls(
