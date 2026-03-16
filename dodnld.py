@@ -129,6 +129,7 @@ STREAM_PATTERNS = (
 BLOCKED_REDIRECT_DOMAINS = (
     "goldensacam.com",
     "purplesacam.com",
+    "adclickad",
     "t.me",
     "dillingers.ie",
     "dillingers.com",
@@ -1232,7 +1233,7 @@ def run_visual_mode(
                     _label_esc_js = try_tab.replace("\\", "\\\\").replace("'", "\\'")
                     _click_tab_js = f"""() => {{
                             var label = '{_label_esc_js}';
-                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com|goldensacam|purplesacam|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com|goldensacam|purplesacam|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
                             var btns = document.querySelectorAll('a.btn-server');
                             for (var i = 0; i < btns.length; i++) {{
                                 var a = btns[i];
