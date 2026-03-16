@@ -1375,6 +1375,8 @@ def run_visual_mode(
             _key_check_iters = [0]
             auto_click_iters = [0]
             voe_click_loop_done_ref = [False]  # VOE: run "click until stream" loop only once
+            tv_click_loop_done_ref = [False]   # TV/ST: run "click until stream" loop only once (~60s timeout)
+            voe_failed_try_tv_ref = [False]    # after VOE timeout, try TV once
             download_proc_ref: list = []
             stopped_by_user_ref: list = [False]
             download_progress_text_ref: list = [None]
@@ -1613,55 +1615,99 @@ def run_visual_mode(
                                     break
                                 # wait 2 seconds before next burst
                                 page.wait_for_timeout(2_000)
-                            # timeout: no stream/link within ~60 seconds — stop visual loop with error (exit code 1)
+                            # timeout: no stream/link within ~60 seconds — try TV once, then stop with error
                             if not target_stream_seen_ref[0] and not stream_url_for_download[0]:
-                                _visual_log("auto_click_player: VOE — timeout 60s, no stream found, stopping with error")
-                                log("VOE: no stream detected within 60 seconds; stopping with error.")
-                                stop_event.set()
-                        elif server_tab != "VOE" and auto_click_iters[0] >= 5:
-                            # TV / ST: fixed pattern (every 5 iters)
-                            auto_click_iters[0] = 0
-                            _visual_log("auto_click_player: attempt")
-                            for _ in range(3):
-                                try_close_ad_overlay(page)
-                                page.wait_for_timeout(300)
-                            if try_click_player(page):
-                                timeline("auto_click_player")
-                                _visual_log("auto_click_player: clicked")
-                            else:
-                                _visual_log("auto_click_player: no click")
-                            page.wait_for_timeout(500)
-                            if server_tab in ("TV", "ST"):
-                                page.wait_for_timeout(10_000)
-                                if try_click_player(page):
-                                    timeline(f"auto_click_player_second_{server_tab.lower()}")
-                                    _visual_log(f"auto_click_player: second click ({server_tab})")
-                                page.wait_for_timeout(2_000)
-                                if try_click_player(page):
-                                    timeline(f"auto_click_player_third_{server_tab.lower()}")
-                                    _visual_log(f"auto_click_player: third click ({server_tab})")
-                                page.wait_for_timeout(500)
-                            if not target_stream_seen_ref[0]:
-                                if try_click_player(page):
-                                    timeline("auto_click_player_extra_no_stream")
-                                    _visual_log("auto_click_player: extra click (stream not found)")
-                                page.wait_for_timeout(300)
-                                page.wait_for_timeout(5_000)
+                                if not voe_failed_try_tv_ref[0]:
+                                    voe_failed_try_tv_ref[0] = True
+                                    _visual_log("auto_click_player: VOE — timeout 60s, no stream; trying TV...")
+                                    log("VOE: no stream within 60s, switching to TV...")
+                                    dismiss_ad_overlays(page)
+                                    page.wait_for_timeout(500)
+                                    try:
+                                        clicked_tv = page.evaluate("""() => {
+                                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                                            var btns = document.querySelectorAll('a.btn-server');
+                                            for (var i = 0; i < btns.length; i++) {
+                                                var a = btns[i];
+                                                if ((a.textContent || a.innerText || '').trim().toUpperCase() !== 'TV') continue;
+                                                if (adLike.test((a.getAttribute('href') || '').trim())) continue;
+                                                a.scrollIntoView({ block: 'center' });
+                                                a.click();
+                                                return true;
+                                            }
+                                            return false;
+                                        }""")
+                                        if clicked_tv:
+                                            page.wait_for_timeout(3000)
+                                            server_tab = "TV"
+                                            auto_click_iters[0] = 5
+                                        else:
+                                            log("TV tab not found; stopping with error.")
+                                            stop_event.set()
+                                    except Exception as e:
+                                        log(f"Failed to switch to TV: {e!r}; stopping.")
+                                        stop_event.set()
+                                else:
+                                    _visual_log("auto_click_player: VOE — timeout 60s, no stream found, stopping with error")
+                                    log("VOE: no stream detected within 60 seconds; stopping with error.")
+                                    stop_event.set()
+                        elif server_tab != "VOE" and not tv_click_loop_done_ref[0] and auto_click_iters[0] >= 5:
+                            # TV / ST: same as VOE — loop with ~60s timeout; scroll up each attempt, then click pattern; exit on stream or timeout
+                            tv_click_loop_done_ref[0] = True
+                            _visual_log(f"auto_click_player: {server_tab} — scroll + click pattern until stream (timeout ~60s)")
+                            for attempt in range(4):  # ~15–20s per attempt → ~60s total
+                                if target_stream_seen_ref[0] or stream_url_for_download[0]:
+                                    _visual_log(f"auto_click_player: {server_tab} — stream link available")
+                                    if stream_url_for_download[0] and not auto_download_pending_ref[0]:
+                                        auto_download_pending_ref[0] = True
+                                    break
                                 try:
-                                    btn = page.locator("#jav-download-trigger").first
-                                    if btn.is_visible(timeout=1000):
-                                        btn.click(force=True)
-                                        timeline("auto_click_download_button")
-                                        _visual_log("auto_click: Download button clicked")
-                                        download_url = stream_url_for_download[0]
-                                        if download_url:
-                                            try:
-                                                LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
-                                                _visual_log(f"download_link_saved: {download_url[:100]}...")
-                                            except Exception:
-                                                pass
+                                    page.evaluate("window.scrollTo(0, 0); document.documentElement.scrollTop = 0; document.body.scrollTop = 0;")
+                                    page.wait_for_timeout(400)
                                 except Exception:
                                     pass
+                                for _ in range(3):
+                                    try_close_ad_overlay(page)
+                                    page.wait_for_timeout(300)
+                                if try_click_player(page):
+                                    timeline("auto_click_player")
+                                    _visual_log(f"auto_click_player: {server_tab} attempt {attempt + 1} click 1")
+                                page.wait_for_timeout(500)
+                                if server_tab in ("TV", "ST"):
+                                    page.wait_for_timeout(10_000)
+                                    if try_click_player(page):
+                                        timeline(f"auto_click_player_second_{server_tab.lower()}")
+                                        _visual_log(f"auto_click_player: {server_tab} attempt {attempt + 1} click 2")
+                                    page.wait_for_timeout(2_000)
+                                    if try_click_player(page):
+                                        timeline(f"auto_click_player_third_{server_tab.lower()}")
+                                        _visual_log(f"auto_click_player: {server_tab} attempt {attempt + 1} click 3")
+                                    page.wait_for_timeout(500)
+                                if target_stream_seen_ref[0] or stream_url_for_download[0]:
+                                    if stream_url_for_download[0] and not auto_download_pending_ref[0]:
+                                        auto_download_pending_ref[0] = True
+                                    break
+                                if not target_stream_seen_ref[0]:
+                                    if try_click_player(page):
+                                        _visual_log("auto_click_player: extra click (stream not found)")
+                                    page.wait_for_timeout(300)
+                                    page.wait_for_timeout(5_000)
+                                    try:
+                                        btn = page.locator("#jav-download-trigger").first
+                                        if btn.is_visible(timeout=1000):
+                                            btn.click(force=True)
+                                            download_url = stream_url_for_download[0]
+                                            if download_url:
+                                                try:
+                                                    LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
+                                                except Exception:
+                                                    pass
+                                    except Exception:
+                                        pass
+                            if not target_stream_seen_ref[0] and not stream_url_for_download[0]:
+                                _visual_log(f"auto_click_player: {server_tab} — timeout ~60s, no stream found, stopping with error")
+                                log(f"{server_tab}: no stream detected within ~60 seconds; stopping with error.")
+                                stop_event.set()
                 except Exception as e:
                     _visual_log(f"loop_error: {e!r}")
                     if isinstance(e, _TargetClosedError) or "closed" in str(e).lower():
