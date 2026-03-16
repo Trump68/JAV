@@ -1,5 +1,6 @@
 """
-Get title/code/cast, call dodnld.py, wait 10 sec, then save to download/{CODE}.txt.
+Get title/code/cast, call dodnld.py, wait 10 sec, then save to download/{CODE}/{CODE}.txt
+and cover image as download/{CODE}/{CODE}.jpg; video saved to download/{CODE}/ by dodnld.
 Usage: python get_title.py [URL]
 File: line 1 = title, line 2 = code (e.g. IPZ-590), line 3 = cast.
 """
@@ -9,6 +10,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -32,11 +34,11 @@ def extract_code_from_title(title: str) -> str | None:
     return m.group(0).upper() if m else None
 
 
-def get_video_title(page_url: str) -> tuple[str | None, str | None, str]:
-    """Load page with Playwright; return (title, code, cast)."""
+def get_video_title(page_url: str) -> tuple[str | None, str | None, str, str | None]:
+    """Load page with Playwright; return (title, code, cast, cover_image_url)."""
     page_url = page_url.strip()
     if not page_url.startswith(("http://", "https://")):
-        return None, None, ""
+        return None, None, "", None
     with sync_playwright() as p:
         browser = launch_browser(p, headless=True)
         try:
@@ -72,14 +74,37 @@ def get_video_title(page_url: str) -> tuple[str | None, str | None, str]:
             }"""
             )
             cast = (cast or "").strip() if isinstance(cast, str) else ""
-            return title, code, cast
+            cover_url = page.evaluate(
+                """() => {
+                const og = document.querySelector('meta[property="og:image"]');
+                if (og && og.content && og.content.trim()) return og.content.trim();
+                const img = document.querySelector('img[src*="img.supjav.com"], img[src*="supjav.com/images"]');
+                if (img && img.src) return img.src;
+                return null;
+            }"""
+            )
+            cover_url = (cover_url or "").strip() if isinstance(cover_url, str) else None
+            if cover_url and not cover_url.startswith(("http://", "https://")):
+                cover_url = None
+            return title, code, cast, cover_url
         finally:
             browser.close()
 
 
+def save_cover_image(url: str, path: Path) -> bool:
+    """Download cover image from url and save to path. Returns True on success."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            path.write_bytes(resp.read())
+        return True
+    except Exception:
+        return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Get title/code/cast, call dodnld.py, wait 10 sec, save to download/{CODE}.txt."
+        description="Get title/code/cast, call dodnld.py, wait 10 sec, save to download/{CODE}/."
     )
     parser.add_argument(
         "url",
@@ -88,7 +113,7 @@ def main() -> int:
         help="Page URL (default: https://supjav.com/411204.html)",
     )
     args = parser.parse_args()
-    title, code, cast = get_video_title(args.url)
+    title, code, cast, cover_url = get_video_title(args.url)
     if not title:
         print("Could not extract title.", file=sys.stderr)
         return 1
@@ -97,17 +122,31 @@ def main() -> int:
     output_name = f"{code}_UNCENSORED.m4v" if is_reducing_mosaic else f"{code}.m4v"
     script_dir = Path(__file__).resolve().parent
     dodnld_py = script_dir / "dodnld.py"
+    # Save video to download/{CODE}/{filename}
+    output_path_arg = f"{code}/{output_name}"
     subprocess.Popen(
-        [sys.executable, str(dodnld_py), args.url, "--visual", "-o", output_name],
+        [sys.executable, str(dodnld_py), args.url, "--visual", "-o", output_path_arg],
         cwd=str(script_dir),
     )
     print("dodnld.py started, waiting 10 sec...", file=sys.stderr)
     time.sleep(10)
-    DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
-    out_file = DOWNLOAD_DIR / f"{code}.txt"
+    code_dir = DOWNLOAD_DIR / code
+    code_dir.mkdir(parents=True, exist_ok=True)
+    out_file = code_dir / f"{code}.txt"
     out_file.write_text(f"{title}\n{code}\n{cast}\n", encoding="utf-8")
     print(title)
     print(f"Saved: {out_file}", file=sys.stderr)
+    # Save cover image as download/{CODE}/{CODE}.jpg
+    cover_path = code_dir / f"{code}.jpg"
+    if not cover_url and code != "unknown":
+        # Fallback: URL like https://img.supjav.com/images/2025/12/rbd812pl.jpg
+        code_plain = code.replace("-", "").lower()
+        cover_url = f"https://img.supjav.com/images/2025/12/{code_plain}pl.jpg"
+    if cover_url:
+        if save_cover_image(cover_url, cover_path):
+            print(f"Saved cover: {cover_path}", file=sys.stderr)
+        else:
+            print(f"Could not download cover: {cover_url}", file=sys.stderr)
     return 0
 
 

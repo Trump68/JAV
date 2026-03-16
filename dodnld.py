@@ -970,12 +970,16 @@ def run_visual_mode(
     server_tab: str = "VOE",
 ) -> None:
     """Open page in visible browser; click server_tab (VOE, ST, etc.) then dismiss ads. Same logic for any tab."""
-    if DOWNLOAD_DIR.exists():
-        try:
-            shutil.rmtree(DOWNLOAD_DIR)
-        except Exception:
-            pass
+    # When saving to a subdir (e.g. download/CODE/file.m4v), do not wipe download/; only ensure target dir exists
+    if "/" not in output_filename and "\\" not in output_filename:
+        if DOWNLOAD_DIR.exists():
+            try:
+                shutil.rmtree(DOWNLOAD_DIR)
+            except Exception:
+                pass
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = DOWNLOAD_DIR / output_filename
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     user_data_dir = Path(__file__).resolve().parent / ".playwright_profile"
     user_data_dir.mkdir(exist_ok=True)
     with sync_playwright() as p:
@@ -1721,7 +1725,7 @@ def main() -> int:
         "-o",
         "--output",
         default="video.m4v",
-        help="Output filename for download (default: video.m4v); partial file saved under this name when interrupted",
+        help="Output path for download (default: video.m4v); use e.g. CODE/CODE.m4v to save under download/CODE/",
     )
     parser.add_argument(
         "--visual",
@@ -1785,8 +1789,12 @@ def main() -> int:
                 print("Could not get stream from VOE player.", file=sys.stderr)
                 return 1
         print(f"Downloading from: {download_url}", file=sys.stderr)
-        if download_video(download_url, args.output, referer="https://supjav.com/"):
-            print(f"Saved to: {args.output}", file=sys.stderr)
+        out_path = Path(args.output)
+        if not out_path.is_absolute():
+            out_path = DOWNLOAD_DIR / args.output
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if download_video(download_url, out_path, referer="https://supjav.com/"):
+            print(f"Saved to: {out_path}", file=sys.stderr)
             return 0
         return 1
 
