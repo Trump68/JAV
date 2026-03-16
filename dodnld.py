@@ -128,6 +128,8 @@ STREAM_PATTERNS = (
 # Domains to block (click hijack / redirect ads) — abort navigation so user stays on player
 BLOCKED_REDIRECT_DOMAINS = (
     "goldensacam.com",
+    "purplesacam.com",
+    "t.me",
     "dillingers.ie",
     "dillingers.com",
     "cactusheadroomscaling",
@@ -165,7 +167,7 @@ BLOCKED_REDIRECT_DOMAINS = (
     "inmobi",
     "tapjoy",
 )
-# Main frame is allowed to stay only on these; otherwise we go_back() to avoid ad redirects
+# Main frame must stay only on these (supjav + player/stream); any other navigation is blocked
 ALLOWED_MAIN_DOMAINS = (
     "supjav.com",
     "supremejav.com",
@@ -173,6 +175,7 @@ ALLOWED_MAIN_DOMAINS = (
     "voe.sx",
     "doppiocdn.com",
     "edgeon-bandwidth.com",
+    "dianaavoidthey",
 )
 
 # Substrings in URL to skip (ads, analytics, tracking)
@@ -1116,10 +1119,12 @@ def run_visual_mode(
 
             def block_redirect_route(route):
                 url = route.request.url
-                if any(dom in url for dom in BLOCKED_REDIRECT_DOMAINS):
-                    route.abort()
-                else:
-                    route.continue_()
+                # Only allow document (main frame) navigations within supjav ecosystem; block any other site
+                if getattr(route.request, "resource_type", None) == "document":
+                    if not any(dom in url for dom in ALLOWED_MAIN_DOMAINS):
+                        route.abort()
+                        return
+                route.continue_()
 
             context.route("**/*", block_redirect_route)
 
@@ -1227,7 +1232,7 @@ def run_visual_mode(
                     _label_esc_js = try_tab.replace("\\", "\\\\").replace("'", "\\'")
                     _click_tab_js = f"""() => {{
                             var label = '{_label_esc_js}';
-                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com|goldensacam|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com|goldensacam|purplesacam|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
                             var btns = document.querySelectorAll('a.btn-server');
                             for (var i = 0; i < btns.length; i++) {{
                                 var a = btns[i];
