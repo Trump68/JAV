@@ -129,6 +129,7 @@ STREAM_PATTERNS = (
 BLOCKED_REDIRECT_DOMAINS = (
     "goldensacam.com",
     "purplesacam.com",
+    "altaffiliatesol",
     "adclickad",
     "t.me",
     "dillingers.ie",
@@ -1120,11 +1121,26 @@ def run_visual_mode(
 
             def block_redirect_route(route):
                 url = route.request.url
-                # Only allow document (main frame) navigations within supjav ecosystem; block any other site
-                if getattr(route.request, "resource_type", None) == "document":
+                # Abort any request to blocked ad/redirect domains (e.g. goldensacam) regardless of type
+                if any(dom in url for dom in BLOCKED_REDIRECT_DOMAINS):
+                    route.abort()
+                    return
+                # Only allow document navigations within supjav ecosystem (intercept and forbid others)
+                res_type = getattr(route.request, "resource_type", None)
+                if res_type == "document":
                     if not any(dom in url for dom in ALLOWED_MAIN_DOMAINS):
                         route.abort()
                         return
+                # Main-frame document: also block if frame is main (some navigations may report differently)
+                try:
+                    req = route.request
+                    frame = getattr(req, "frame", None)
+                    if frame and frame == page.main_frame and (res_type == "document" or res_type is None):
+                        if not any(dom in url for dom in ALLOWED_MAIN_DOMAINS) or any(dom in url for dom in BLOCKED_REDIRECT_DOMAINS):
+                            route.abort()
+                            return
+                except Exception:
+                    pass
                 route.continue_()
 
             context.route("**/*", block_redirect_route)
@@ -1139,6 +1155,20 @@ def run_visual_mode(
             context.on("page", on_new_page)
 
             page = context.pages[0] if context.pages else context.new_page()
+
+            def _on_framenavigated(frame):
+                """Intercept main-frame navigation to forbidden site and go back immediately."""
+                try:
+                    if frame != page.main_frame:
+                        return
+                    url = frame.url
+                    if any(dom in url for dom in BLOCKED_REDIRECT_DOMAINS) or not any(dom in url for dom in ALLOWED_MAIN_DOMAINS):
+                        _visual_log("intercept_forbidden_navigation going_back")
+                        page.go_back(timeout=5000)
+                except Exception:
+                    pass
+
+            page.on("framenavigated", _on_framenavigated)
 
             def log(msg: str) -> None:
                 _visual_log(msg)
@@ -1233,7 +1263,7 @@ def run_visual_mode(
                     _label_esc_js = try_tab.replace("\\", "\\\\").replace("'", "\\'")
                     _click_tab_js = f"""() => {{
                             var label = '{_label_esc_js}';
-                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com|goldensacam|purplesacam|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com|goldensacam|purplesacam|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
                             var btns = document.querySelectorAll('a.btn-server');
                             for (var i = 0; i < btns.length; i++) {{
                                 var a = btns[i];
@@ -1377,6 +1407,7 @@ def run_visual_mode(
             voe_click_loop_done_ref = [False]  # VOE: run "click until stream" loop only once
             tv_click_loop_done_ref = [False]   # TV/ST: run "click until stream" loop only once (~60s timeout)
             voe_failed_try_tv_ref = [False]    # after VOE timeout, try TV once
+            tv_failed_try_st_ref = [False]     # after TV timeout, try ST once
             download_proc_ref: list = []
             stopped_by_user_ref: list = [False]
             download_progress_text_ref: list = [None]
@@ -1625,7 +1656,7 @@ def run_visual_mode(
                                     page.wait_for_timeout(500)
                                     try:
                                         clicked_tv = page.evaluate("""() => {
-                                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
                                             var btns = document.querySelectorAll('a.btn-server');
                                             for (var i = 0; i < btns.length; i++) {
                                                 var a = btns[i];
@@ -1652,7 +1683,7 @@ def run_visual_mode(
                                     log("VOE: no stream detected within 60 seconds; stopping with error.")
                                     stop_event.set()
                         elif server_tab != "VOE" and not tv_click_loop_done_ref[0] and auto_click_iters[0] >= 5:
-                            # TV / ST: same as VOE — loop with ~60s timeout; scroll up each attempt, then click pattern; exit on stream or timeout
+                            # TV / ST: same as VOE — loop with ~60s timeout; forbid navigation to other sites (go_back if left)
                             tv_click_loop_done_ref[0] = True
                             _visual_log(f"auto_click_player: {server_tab} — scroll + click pattern until stream (timeout ~60s)")
                             for attempt in range(4):  # ~15–20s per attempt → ~60s total
@@ -1661,6 +1692,15 @@ def run_visual_mode(
                                     if stream_url_for_download[0] and not auto_download_pending_ref[0]:
                                         auto_download_pending_ref[0] = True
                                     break
+                                current_url = page.url
+                                if any(dom in current_url for dom in BLOCKED_REDIRECT_DOMAINS) or not any(dom in current_url for dom in ALLOWED_MAIN_DOMAINS):
+                                    _visual_log(f"auto_click_player: {server_tab} — forbidden site, going back")
+                                    try:
+                                        page.go_back()
+                                        page.wait_for_timeout(1500)
+                                    except Exception:
+                                        pass
+                                    continue
                                 try:
                                     page.evaluate("window.scrollTo(0, 0); document.documentElement.scrollTop = 0; document.body.scrollTop = 0;")
                                     page.wait_for_timeout(400)
@@ -1675,10 +1715,27 @@ def run_visual_mode(
                                 page.wait_for_timeout(500)
                                 if server_tab in ("TV", "ST"):
                                     page.wait_for_timeout(10_000)
+                                    current_url = page.url
+                                    if any(dom in current_url for dom in BLOCKED_REDIRECT_DOMAINS) or not any(dom in current_url for dom in ALLOWED_MAIN_DOMAINS):
+                                        _visual_log(f"auto_click_player: {server_tab} — forbidden site after wait, going back")
+                                        try:
+                                            page.go_back()
+                                            page.wait_for_timeout(1500)
+                                        except Exception:
+                                            pass
+                                        continue
                                     if try_click_player(page):
                                         timeline(f"auto_click_player_second_{server_tab.lower()}")
                                         _visual_log(f"auto_click_player: {server_tab} attempt {attempt + 1} click 2")
                                     page.wait_for_timeout(2_000)
+                                    current_url = page.url
+                                    if any(dom in current_url for dom in BLOCKED_REDIRECT_DOMAINS) or not any(dom in current_url for dom in ALLOWED_MAIN_DOMAINS):
+                                        try:
+                                            page.go_back()
+                                            page.wait_for_timeout(1500)
+                                        except Exception:
+                                            pass
+                                        continue
                                     if try_click_player(page):
                                         timeline(f"auto_click_player_third_{server_tab.lower()}")
                                         _visual_log(f"auto_click_player: {server_tab} attempt {attempt + 1} click 3")
@@ -1705,9 +1762,41 @@ def run_visual_mode(
                                     except Exception:
                                         pass
                             if not target_stream_seen_ref[0] and not stream_url_for_download[0]:
-                                _visual_log(f"auto_click_player: {server_tab} — timeout ~60s, no stream found, stopping with error")
-                                log(f"{server_tab}: no stream detected within ~60 seconds; stopping with error.")
-                                stop_event.set()
+                                if server_tab == "TV" and not tv_failed_try_st_ref[0]:
+                                    tv_failed_try_st_ref[0] = True
+                                    _visual_log("auto_click_player: TV — timeout 60s, no stream; trying ST...")
+                                    log("TV: no stream within 60s, switching to ST...")
+                                    dismiss_ad_overlays(page)
+                                    page.wait_for_timeout(500)
+                                    try:
+                                        clicked_st = page.evaluate("""() => {
+                                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                                            var btns = document.querySelectorAll('a.btn-server');
+                                            for (var i = 0; i < btns.length; i++) {
+                                                var a = btns[i];
+                                                if ((a.textContent || a.innerText || '').trim().toUpperCase() !== 'ST') continue;
+                                                if (adLike.test((a.getAttribute('href') || '').trim())) continue;
+                                                a.scrollIntoView({ block: 'center' });
+                                                a.click();
+                                                return true;
+                                            }
+                                            return false;
+                                        }""")
+                                        if clicked_st:
+                                            page.wait_for_timeout(3000)
+                                            server_tab = "ST"
+                                            tv_click_loop_done_ref[0] = False
+                                            auto_click_iters[0] = 5
+                                        else:
+                                            log("ST tab not found; stopping with error.")
+                                            stop_event.set()
+                                    except Exception as e:
+                                        log(f"Failed to switch to ST: {e!r}; stopping.")
+                                        stop_event.set()
+                                else:
+                                    _visual_log(f"auto_click_player: {server_tab} — timeout ~60s, no stream found, stopping with error")
+                                    log(f"{server_tab}: no stream detected within ~60 seconds; stopping with error.")
+                                    stop_event.set()
                 except Exception as e:
                     _visual_log(f"loop_error: {e!r}")
                     if isinstance(e, _TargetClosedError) or "closed" in str(e).lower():
