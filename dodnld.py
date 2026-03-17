@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urljoin, urlparse
+import urllib.request
 
 from playwright.sync_api import sync_playwright
 
@@ -129,6 +130,7 @@ STREAM_PATTERNS = (
 BLOCKED_REDIRECT_DOMAINS = (
     "goldensacam.com",
     "purplesacam.com",
+    "aj2532.bid",
     "altaffiliatesol",
     "adclickad",
     "t.me",
@@ -178,6 +180,8 @@ ALLOWED_MAIN_DOMAINS = (
     "doppiocdn.com",
     "edgeon-bandwidth.com",
     "dianaavoidthey",
+    "streamtape.com",
+    "streamtape.xyz",
 )
 
 # Substrings in URL to skip (ads, analytics, tracking)
@@ -222,7 +226,7 @@ def is_stream_output(url: str) -> bool:
         return True
     if ".mp4" in lower and any(x in lower for x in ("growcdnssedge", "media-hls.growcdnssedge")):
         return False  # skip ad CDN segments
-    if any(x in lower for x in ("turbovidhls.com/t/", "supremejav.com/supjav", "turboviplay.com", "turbosplayer.com", "doppiocdn.com")):
+    if any(x in lower for x in ("turbovidhls.com/t/", "supremejav.com/supjav", "turboviplay.com", "turbosplayer.com", "doppiocdn.com", "streamtape")):
         return True  # player page or video CDN
     if lower.startswith("blob:"):
         return True  # blob URL can be the active video
@@ -465,6 +469,7 @@ PLAYER_IFRAME_SRC_SUBSTRINGS = (
     "voe.sx",
     "dianaavoidthey",
     "supjav.com",  # same-origin player
+    "streamtape",
 )
 
 
@@ -949,7 +954,7 @@ def extract_m3u8_from_player_page(player_url: str, referer: str = "https://supja
             browser.close()
 
 
-CLOUDFLARE_WAIT_MS = 25_000  # wait for Cloudflare "Verifying you are human" to pass
+CLOUDFLARE_WAIT_MS = 12_500  # wait for Cloudflare "Verifying you are human" to pass (half of previous 25s)
 
 
 def wait_for_cloudflare_pass(page, timeout_ms: int = CLOUDFLARE_WAIT_MS) -> None:
@@ -972,6 +977,7 @@ PLAYER_CENTER_FILE = Path(__file__).resolve().parent / ".player_center.json"
 VISUAL_LOG_FILE = Path(__file__).resolve().parent / ".visual_mode.log"
 DOWNLOAD_DIR = Path(__file__).resolve().parent / "download"
 LAST_DOWNLOAD_URL_FILE = Path(__file__).resolve().parent / "last_download_url.txt"
+STREAM_URLS_LOG = Path(__file__).resolve().parent / "stream_urls.log"
 
 # Target stream URL pattern: all substrings must be present (query params may vary between runs)
 TARGET_STREAM_URL_PARTS = (
@@ -982,17 +988,33 @@ TARGET_STREAM_URL_PARTS = (
 
 
 def _visual_log(msg: str, log_file: Path | None = None) -> None:
-    """Append timestamp + message to visual log file for analysis."""
+    """Optional: append to visual log (disabled to reduce disk writes)."""
+    pass
+
+
+def _log_stream_url(url: str, source: str = "capture") -> None:
+    """Append stream URL to stream_urls.log (timestamp, source, url) for later analysis."""
     from datetime import datetime
-    log_path = log_file or VISUAL_LOG_FILE
+    if not url or not url.strip():
+        return
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    line = f"{ts} {msg}\n"
+    line = f"{ts}\t{source}\t{url.strip()}\n"
     try:
-        with open(log_path, "a", encoding="utf-8") as f:
+        with open(STREAM_URLS_LOG, "a", encoding="utf-8") as f:
             f.write(line)
             f.flush()
     except Exception:
         pass
+
+
+def _is_downloadable_stream_url(url: str | None) -> bool:
+    """True if URL can be used for download (yt-dlp etc). Streamtape /e/ embed is not downloadable — need get_video."""
+    if not url:
+        return False
+    lower = url.lower()
+    if "streamtape" in lower and "/e/" in lower and "get_video" not in lower:
+        return False
+    return True
 
 
 def run_visual_mode(
@@ -1199,10 +1221,26 @@ def run_visual_mode(
                 lower = url.lower()
                 if "jwplayer" in lower or "/jwplayer/" in lower:
                     return False
+                # Segment URLs (not playlists): skip so we keep master/playlist only
+                if "_HLS_msn" in lower or "_HLS_part" in lower or "/segment" in lower or "segment/" in lower:
+                    return False
                 if "master.m3u8" in lower or ("index" in lower and ".m3u8" in lower):
                     return True
                 if "edgeon-bandwidth" in lower and ".m3u8" in lower and "urlset" in lower:
                     return True
+                # ST/TV and other players often use playlist.m3u8, video.m3u8, or plain .m3u8 — accept as playlist
+                if ".m3u8" in lower and ("playlist" in lower or "video.m3u8" in lower or "manifest" in lower):
+                    return True
+                # Path ends with .m3u8 and filename is not a segment index (e.g. "0.m3u8", "1.m3u8")
+                try:
+                    path = url.split("?")[0].rstrip("/")
+                    if path.endswith(".m3u8"):
+                        name = path.split("/")[-1]
+                        base = name[:-5]  # without .m3u8
+                        if not (base.isdigit() or (len(base) <= 2 and base.isalnum())):
+                            return True
+                except Exception:
+                    pass
                 return False
 
             def on_response(response):
@@ -1211,22 +1249,38 @@ def run_visual_mode(
                     return
                 if not url_not_skipped(url):
                     return
-                if is_stream_url(url) or (response.headers.get("content-type") and is_media_content_type(response.headers.get("content-type", ""))):
-                    if _is_hls_playlist_url(url):
+                is_media = bool(response.headers.get("content-type") and is_media_content_type(response.headers.get("content-type", "")))
+                lower = url.lower()
+                is_st_tv_m3u8 = server_tab in ("ST", "TV") and ".m3u8" in lower
+                is_streamtape = "streamtape" in lower and (
+                    ".m3u8" in lower or ".mp4" in lower or "get_video" in lower or "/file/" in lower or is_media
+                )
+                if not (is_stream_url(url) or is_media or is_st_tv_m3u8 or is_streamtape):
+                    return
+                if _is_hls_playlist_url(url):
+                    stream_url_for_download[0] = url
+                    timeline("stream_captured_m3u8")
+                elif is_st_tv_m3u8:
+                    if "_HLS_msn" not in lower and "_HLS_part" not in lower and "segment" not in lower:
                         stream_url_for_download[0] = url
-                        timeline("stream_captured_m3u8")
-                    if _is_target_stream_url(url):
-                        target_stream_seen_ref[0] = True
-                        timeline(f"TARGET_STREAM_APPEARED: {url}")
-                        log("Target stream link appeared.")
-                        _visual_log(f"TARGET_URL_FULL: {url}")
-                        for t, act in timeline_entries:
-                            _visual_log(f"  [{t}] {act}")
+                        timeline("stream_captured_m3u8_st_tv")
+                elif is_streamtape:
+                    # Prefer get_video URL over embed /e/ — get_video is the direct link that works with yt-dlp
+                    current = stream_url_for_download[0] or ""
+                    if "get_video" in url.lower():
                         stream_url_for_download[0] = url
-                        if auto_download:
-                            auto_download_pending_ref[0] = True
-                    print(f"[STREAM] {url[:120]}{'...' if len(url) > 120 else ''}")
-                    sys.stdout.flush()
+                    elif "get_video" not in current.lower():
+                        stream_url_for_download[0] = url
+                    timeline("stream_captured_streamtape")
+                if _is_target_stream_url(url):
+                    target_stream_seen_ref[0] = True
+                    timeline(f"TARGET_STREAM_APPEARED: {url}")
+                    log("Target stream link appeared.")
+                    stream_url_for_download[0] = url
+                    if auto_download and _is_downloadable_stream_url(url):
+                        auto_download_pending_ref[0] = True
+                print(f"[STREAM] {url[:120]}{'...' if len(url) > 120 else ''}")
+                sys.stdout.flush()
 
             page.on("response", on_response)
             page.goto(page_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
@@ -1263,7 +1317,7 @@ def run_visual_mode(
                     _label_esc_js = try_tab.replace("\\", "\\\\").replace("'", "\\'")
                     _click_tab_js = f"""() => {{
                             var label = '{_label_esc_js}';
-                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com|goldensacam|purplesacam|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
                             var btns = document.querySelectorAll('a.btn-server');
                             for (var i = 0; i < btns.length; i++) {{
                                 var a = btns[i];
@@ -1448,12 +1502,14 @@ def run_visual_mode(
                         log("Auto-download: target link appeared, starting.")
                         download_url = stream_url_for_download[0]
                         if download_url:
-                            set_download_button_state("downloading")
-                            log("Auto-download started. You can close the browser; download will continue.")
+                            _log_stream_url(download_url, "download_click")
                             try:
                                 LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
                             except Exception:
                                 pass
+                            log("Stream URL saved to stream_urls.log and last_download_url.txt")
+                            set_download_button_state("downloading")
+                            log("Auto-download started. You can close the browser; download will continue.")
                             out_path = DOWNLOAD_DIR / output_filename
                             stopped_by_user_ref[0] = False
                             download_proc_ref.clear()
@@ -1551,12 +1607,14 @@ def run_visual_mode(
                         page.evaluate("() => { window.__userSawStream = false; window.__userSawStreamTime = 0; }")
                         download_url = stream_url_for_download[0]
                         if download_url:
-                            set_download_button_state("downloading")
-                            log("Download started. You can close the browser; download will continue.")
+                            _log_stream_url(download_url, "download_click")
                             try:
                                 LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
                             except Exception:
                                 pass
+                            log("Stream URL saved to stream_urls.log and last_download_url.txt")
+                            set_download_button_state("downloading")
+                            log("Download started. You can close the browser; download will continue.")
                             out_path = DOWNLOAD_DIR / output_filename
                             stopped_by_user_ref[0] = False
                             download_proc_ref.clear()
@@ -1624,7 +1682,7 @@ def run_visual_mode(
                             for attempt in range(30):  # ~30 * (2s + small overhead) ≈ 60 seconds
                                 if target_stream_seen_ref[0] or stream_url_for_download[0]:
                                     _visual_log("auto_click_player: VOE — stream link available, breaking to start download")
-                                    if stream_url_for_download[0] and not auto_download_pending_ref[0]:
+                                    if stream_url_for_download[0] and _is_downloadable_stream_url(stream_url_for_download[0]) and not auto_download_pending_ref[0]:
                                         auto_download_pending_ref[0] = True
                                     break
                                 # keep overlays clean before each click burst
@@ -1641,7 +1699,7 @@ def run_visual_mode(
                                         break
                                 if target_stream_seen_ref[0] or stream_url_for_download[0]:
                                     _visual_log("auto_click_player: VOE — stream detected after click burst")
-                                    if stream_url_for_download[0] and not auto_download_pending_ref[0]:
+                                    if stream_url_for_download[0] and _is_downloadable_stream_url(stream_url_for_download[0]) and not auto_download_pending_ref[0]:
                                         auto_download_pending_ref[0] = True
                                     break
                                 # wait 2 seconds before next burst
@@ -1656,7 +1714,7 @@ def run_visual_mode(
                                     page.wait_for_timeout(500)
                                     try:
                                         clicked_tv = page.evaluate("""() => {
-                                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
                                             var btns = document.querySelectorAll('a.btn-server');
                                             for (var i = 0; i < btns.length; i++) {
                                                 var a = btns[i];
@@ -1689,7 +1747,7 @@ def run_visual_mode(
                             for attempt in range(4):  # ~15–20s per attempt → ~60s total
                                 if target_stream_seen_ref[0] or stream_url_for_download[0]:
                                     _visual_log(f"auto_click_player: {server_tab} — stream link available")
-                                    if stream_url_for_download[0] and not auto_download_pending_ref[0]:
+                                    if stream_url_for_download[0] and _is_downloadable_stream_url(stream_url_for_download[0]) and not auto_download_pending_ref[0]:
                                         auto_download_pending_ref[0] = True
                                     break
                                 current_url = page.url
@@ -1741,7 +1799,7 @@ def run_visual_mode(
                                         _visual_log(f"auto_click_player: {server_tab} attempt {attempt + 1} click 3")
                                     page.wait_for_timeout(500)
                                 if target_stream_seen_ref[0] or stream_url_for_download[0]:
-                                    if stream_url_for_download[0] and not auto_download_pending_ref[0]:
+                                    if stream_url_for_download[0] and _is_downloadable_stream_url(stream_url_for_download[0]) and not auto_download_pending_ref[0]:
                                         auto_download_pending_ref[0] = True
                                     break
                                 if not target_stream_seen_ref[0]:
@@ -1755,6 +1813,7 @@ def run_visual_mode(
                                             btn.click(force=True)
                                             download_url = stream_url_for_download[0]
                                             if download_url:
+                                                _log_stream_url(download_url, "download_click")
                                                 try:
                                                     LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
                                                 except Exception:
@@ -1770,7 +1829,7 @@ def run_visual_mode(
                                     page.wait_for_timeout(500)
                                     try:
                                         clicked_st = page.evaluate("""() => {
-                                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
                                             var btns = document.querySelectorAll('a.btn-server');
                                             for (var i = 0; i < btns.length; i++) {
                                                 var a = btns[i];
@@ -1847,6 +1906,99 @@ def _parse_ytdlp_progress(line: str) -> str | None:
     return f"{pct}%"
 
 
+def resolve_streamtape_direct_url(embed_url: str, referer: str = "https://supjav.com/") -> str | None:
+    """Open Streamtape embed page (/e/...), get direct video URL from DOM (get_video) or network, return it.
+    yt-dlp does not support streamtape; we need the direct URL for generic download."""
+    if "streamtape" not in embed_url.lower() or "/e/" not in embed_url:
+        return None
+    video_urls: list[str] = []
+    get_video_urls: list[str] = []
+
+    def on_response(response):
+        url = response.url
+        try:
+            ct = (response.headers.get("content-type") or "").lower()
+            if "video/" in ct or ("application/octet-stream" in ct and ".mp4" in url):
+                video_urls.append(url)
+            if "get_video" in url.lower() and url.startswith("http"):
+                get_video_urls.append(url)
+        except Exception:
+            pass
+
+    with sync_playwright() as p:
+        browser = launch_browser(p, headless=True)
+        try:
+            context = new_stealth_context(browser, extra_http_headers={"Referer": referer})
+            context.set_default_timeout(30_000)
+            page = context.new_page()
+            page.on("response", on_response)
+            page.goto(embed_url, wait_until="domcontentloaded", timeout=30_000)
+            page.wait_for_timeout(5000)
+            try:
+                page.locator("video").first.click(force=True, timeout=5000)
+            except Exception:
+                try:
+                    page.locator("body").first.click(force=True, timeout=2000)
+                except Exception:
+                    pass
+            page.wait_for_timeout(8000)
+            if video_urls:
+                return video_urls[-1]
+            if get_video_urls:
+                return get_video_urls[-1]
+            # Extract get_video from DOM: #videolink, #ideoolink, #robotlink or any a[href*="get_video"]
+            try:
+                link = page.evaluate("""() => {
+                    var sel = document.querySelector('a[href*="get_video"]');
+                    if (sel && sel.href) return sel.href;
+                    for (var id of ['videolink', 'ideoolink', 'robotlink', 'videolink2']) {
+                        var el = document.getElementById(id);
+                        if (!el) continue;
+                        var a = el.querySelector && el.querySelector('a[href*="get_video"]');
+                        if (a && a.href) return a.href;
+                        var text = (el.innerText || el.textContent || '').trim();
+                        if (text.indexOf('get_video') >= 0) {
+                            var m = text.match(/https?:\\/\\/[^\\s"']+get_video[^\\s"']*/);
+                            if (m) return m[0];
+                        }
+                    }
+                    var html = document.documentElement.innerHTML;
+                    var m = html.match(/https?:\\/\\/[^"\\s<>]+get_video[^"\\s<>]*/);
+                    return m ? m[0] : null;
+                }""")
+                if link and isinstance(link, str) and "get_video" in link:
+                    return link
+            except Exception:
+                pass
+            # Fallback: regex in page HTML
+            try:
+                html = page.content()
+                m = re.search(r'https?://[^\s"\'<>]+get_video[^\s"\'<>]*', html)
+                if m:
+                    return m.group(0).rstrip("'\">,)")
+            except Exception:
+                pass
+            return None
+        finally:
+            browser.close()
+
+
+def _follow_redirect_to_video(url: str, referer: str = "https://streamtape.com/") -> str | None:
+    """Follow redirects for get_video (or any) URL; return final URL (for streamtape CDN)."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Referer": referer})
+        req.get_method = lambda: "HEAD"
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.geturl()
+    except Exception:
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Referer": referer})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.geturl()
+        except Exception:
+            return None
+
+
 def download_video(
     url: str,
     output_path: str | Path,
@@ -1859,12 +2011,31 @@ def download_video(
     If progress_callback is given, call it with progress string during download.
     If out_proc is a list, the Popen process is appended so caller can kill it to stop and save.
     If stopped_by_user is set by caller when killing, we return True (partial file saved)."""
+    if "streamtape.com/e/" in url or "streamtape.xyz/e/" in url:
+        if progress_callback:
+            try:
+                progress_callback("Resolving Streamtape...")
+            except Exception:
+                pass
+        direct = resolve_streamtape_direct_url(url, referer=referer)
+        if direct:
+            if "get_video" in direct.lower():
+                final = _follow_redirect_to_video(direct, referer="https://streamtape.com/")
+                if final:
+                    direct = final
+            url = direct
+            print("Using direct Streamtape URL for download.", file=sys.stderr)
+        else:
+            print("Could not resolve Streamtape direct URL, trying original.", file=sys.stderr)
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     if output_path.suffix:
         out_arg = str(output_path)
     else:
         out_arg = str(output_path.with_suffix("")) + ".%(ext)s"
+    dl_referer = referer
+    if "streamtape" in url.lower():
+        dl_referer = "https://streamtape.com/"
     cmd = [
         sys.executable,
         "-u",
@@ -1873,7 +2044,7 @@ def download_video(
         "--no-warnings",
         "--newline",
         "--no-part",
-        "--add-header", f"Referer:{referer}",
+        "--add-header", f"Referer:{dl_referer}",
         "--user-agent", USER_AGENT,
         "-o", out_arg,
         url,

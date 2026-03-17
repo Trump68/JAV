@@ -30,6 +30,35 @@ def _db_path() -> Path:
     return Path(__file__).resolve().parent / "downloads.db"
 
 
+def _video_file_valid(path: Path) -> bool:
+    """Run ffprobe; return True if file has a normal video stream (h264/hevc, reasonable resolution/duration)."""
+    if not path.exists() or path.stat().st_size < 1000:
+        return False
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe", "-v", "error", "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name,width,height,duration",
+                "-of", "default=noprint_wrappers=1", str(path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if out.returncode != 0:
+            return False
+        # Reject PNG or 1x1 (broken container); accept h264/hevc/mpeg4 with real resolution
+        if "codec_name=png" in out.stdout or "width=1\n" in out.stdout or "width=1 " in out.stdout:
+            return False
+        if "codec_name=h264" in out.stdout or "codec_name=hevc" in out.stdout or "codec_name=mpeg4" in out.stdout:
+            return True
+        return False
+    except FileNotFoundError:
+        return True  # ffprobe not installed, skip check
+    except (subprocess.TimeoutExpired, Exception):
+        return False
+
+
 def _init_db(conn: sqlite3.Connection) -> None:
     conn.execute(
         """CREATE TABLE IF NOT EXISTS downloads (
@@ -320,6 +349,11 @@ def main() -> int:
         dest="no_visual",
         help="Call dodnld.py in headless mode (no browser window).",
     )
+    parser.add_argument(
+        "--redownload",
+        action="store_true",
+        help="With --process-list: download even if the video is already in the DB (re-download).",
+    )
     args = parser.parse_args()
     use_visual = args.visual and not getattr(args, "no_visual", False)
 
@@ -358,7 +392,7 @@ def main() -> int:
             if "reducing mosaic" not in labels.lower():
                 continue
             type_str = "Reducing Mosaic"
-            if _already_downloaded(conn, code, type_str, date):
+            if not getattr(args, "redownload", False) and _already_downloaded(conn, code, type_str, date):
                 print(f"[PROCESS] {idx}: skip (already in DB) {code} {date}", file=sys.stderr)
                 skipped += 1
                 continue
@@ -374,11 +408,20 @@ def main() -> int:
                 dodnld_cmd.insert(-2, "--visual")
             proc = subprocess.run(dodnld_cmd, cwd=str(script_dir))
             if proc.returncode == 0:
+                folder_dir = DOWNLOAD_DIR / cast_slug / folder_name
+                video_path = folder_dir / filename
+                if not _video_file_valid(video_path):
+                    print(f"[PROCESS] {idx}: invalid/corrupt video (ffprobe), removing {folder_dir}", file=sys.stderr)
+                    if folder_dir.exists():
+                        try:
+                            shutil.rmtree(folder_dir)
+                        except Exception as rm_err:
+                            print(f"[PROCESS] Could not remove {folder_dir}: {rm_err!r}", file=sys.stderr)
+                    continue
                 # Save DB record
                 _save_download(conn, code, type_str, date, url, labels)
                 # Save POSTER.jpg into the same folder (inside actress folder)
                 try:
-                    folder_dir = DOWNLOAD_DIR / cast_slug / folder_name
                     folder_dir.mkdir(parents=True, exist_ok=True)
                     poster_path = folder_dir / "POSTER.jpg"
                     if not poster_path.exists():
