@@ -2397,54 +2397,97 @@ def _download_direct_http(
     progress_callback: Callable[[str], None] | None = None,
     stopped_by_user: list | None = None,
 ) -> bool:
-    """Download a direct video URL via HTTP (urllib), with progress reporting."""
-    print(f"Downloading direct: {url[:100]}")
-    sys.stdout.flush()
+    """Download a direct video URL via HTTP (urllib), with progress reporting. Resumes via Range if file exists."""
+    output_path = Path(output_path).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    start_byte = 0
+    if output_path.exists():
+        start_byte = output_path.stat().st_size
+    if start_byte > 0:
+        print(f"Resuming from {start_byte} bytes ({start_byte / (1024*1024):.1f} MB)")
+        sys.stdout.flush()
+    else:
+        print(f"Downloading direct: {url[:100]}")
+        sys.stdout.flush()
     try:
-        req = urllib.request.Request(url, headers={
-            "User-Agent": USER_AGENT,
-            "Referer": referer,
-        })
-        with urllib.request.urlopen(req, timeout=600) as resp:
+        headers = {"User-Agent": USER_AGENT, "Referer": referer}
+        if start_byte > 0:
+            headers["Range"] = f"bytes={start_byte}-"
+        req = urllib.request.Request(url, headers=headers)
+        resp = urllib.request.urlopen(req, timeout=600)
+        status = getattr(resp, "status", 200)
+        if status == 206:
+            # Partial content — append to existing file
+            content_length = int(resp.headers.get("Content-Length", 0))
+            content_range = resp.headers.get("Content-Range", "")
+            total = start_byte + content_length
+            if content_range and "/" in content_range:
+                try:
+                    total = int(content_range.split("/")[1].strip())
+                except (ValueError, IndexError):
+                    pass
+            mode = "ab"
+        elif status == 200:
+            # Server ignored Range — must re-download from start
+            resp.close()
+            start_byte = 0
+            headers_pop = {k: v for k, v in headers.items() if k.lower() != "range"}
+            req = urllib.request.Request(url, headers=headers_pop)
+            resp = urllib.request.urlopen(req, timeout=600)
             total = int(resp.headers.get("Content-Length", 0))
-            downloaded = 0
-            chunk_size = 256 * 1024
-            start_time = time.time()
-            output_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(output_path, "wb") as f:
-                while True:
-                    if stopped_by_user and stopped_by_user[0]:
-                        pass
-                        return True
-                    chunk = resp.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    elapsed = time.time() - start_time
-                    if total > 0:
-                        pct = downloaded * 100 // total
-                        mb = downloaded / (1024 * 1024)
-                        total_mb = total / (1024 * 1024)
-                        speed_mbs = (downloaded / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-                        if speed_mbs > 0 and downloaded < total:
-                            eta_sec = int((total - downloaded) / (downloaded / elapsed))
-                            eta_str = f"{eta_sec // 3600}:{(eta_sec % 3600) // 60:02d}:{eta_sec % 60:02d}" if eta_sec >= 3600 else f"{eta_sec // 60}:{eta_sec % 60:02d}"
-                            msg = f"{pct}% ({mb:.1f}/{total_mb:.1f} MB) {speed_mbs:.2f} MB/s ETA {eta_str}"
-                        else:
-                            msg = f"{pct}% ({mb:.1f}/{total_mb:.1f} MB)"
+            content_length = total
+            mode = "wb"
+        elif status in (403, 404, 416):
+            resp.close()
+            print(f"Download failed: server returned {status} (partial file kept)")
+            sys.stdout.flush()
+            return False
+        else:
+            resp.close()
+            print(f"Download failed: unexpected status {status}")
+            sys.stdout.flush()
+            return False
+
+        chunk_size = 256 * 1024
+        start_time = time.time()
+        downloaded = start_byte
+        written_this_session = 0
+        with open(output_path, mode) as f:
+            while True:
+                if stopped_by_user and stopped_by_user[0]:
+                    return True
+                chunk = resp.read(chunk_size)
+                if not chunk:
+                    break
+                f.write(chunk)
+                written_this_session += len(chunk)
+                downloaded = start_byte + written_this_session
+                elapsed = time.time() - start_time
+                if total > 0:
+                    pct = downloaded * 100 // total
+                    mb = downloaded / (1024 * 1024)
+                    total_mb = total / (1024 * 1024)
+                    speed_mbs = (written_this_session / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+                    if speed_mbs > 0 and downloaded < total and written_this_session > 0:
+                        rate = written_this_session / elapsed
+                        eta_sec = int((total - downloaded) / rate) if rate > 0 else 0
+                        eta_str = f"{eta_sec // 3600}:{(eta_sec % 3600) // 60:02d}:{eta_sec % 60:02d}" if eta_sec >= 3600 else f"{eta_sec // 60}:{eta_sec % 60:02d}"
+                        msg = f"{pct}% ({mb:.1f}/{total_mb:.1f} MB) {speed_mbs:.2f} MB/s ETA {eta_str}"
                     else:
-                        mb = downloaded / (1024 * 1024)
-                        speed_mbs = mb / elapsed if elapsed > 0 else 0
-                        msg = f"{mb:.1f} MB downloaded" + (f" {speed_mbs:.2f} MB/s" if speed_mbs > 0 else "")
-                    if progress_callback:
-                        try:
-                            progress_callback(msg)
-                        except Exception:
-                            pass
-                    if downloaded % (5 * 1024 * 1024) < chunk_size:
-                        print(msg)
-                        sys.stdout.flush()
+                        msg = f"{pct}% ({mb:.1f}/{total_mb:.1f} MB)"
+                else:
+                    mb = downloaded / (1024 * 1024)
+                    speed_mbs = mb / elapsed if elapsed > 0 else 0
+                    msg = f"{mb:.1f} MB downloaded" + (f" {speed_mbs:.2f} MB/s" if speed_mbs > 0 else "")
+                if progress_callback:
+                    try:
+                        progress_callback(msg)
+                    except Exception:
+                        pass
+                if written_this_session % (5 * 1024 * 1024) < chunk_size:
+                    print(msg)
+                    sys.stdout.flush()
+        resp.close()
         print(f"Download completed ({downloaded / (1024*1024):.1f} MB).")
         sys.stdout.flush()
         return True
@@ -2524,6 +2567,7 @@ def download_video(
         "--no-warnings",
         "--newline",
         "--no-part",
+        "--continue",
         "--add-header", f"Referer:{dl_referer}",
         "--user-agent", USER_AGENT,
     ]

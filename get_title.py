@@ -446,13 +446,12 @@ def main() -> int:
                     print(f"[PROCESS] Could not save poster for {url}: {poster_err!r}", file=sys.stderr)
             else:
                 print(f"[PROCESS] Failed (exit {proc.returncode}) for {url}", file=sys.stderr)
+                # Do not remove partial download — user can retry or resume manually
                 folder_dir = DOWNLOAD_DIR / cast_slug / folder_name
-                if folder_dir.exists():
-                    try:
-                        shutil.rmtree(folder_dir)
-                        print(f"[PROCESS] Removed folder: {folder_dir}", file=sys.stderr)
-                    except Exception as rm_err:
-                        print(f"[PROCESS] Could not remove folder {folder_dir}: {rm_err!r}", file=sys.stderr)
+                video_path = folder_dir / filename
+                if video_path.exists():
+                    size_mb = video_path.stat().st_size / (1024 * 1024)
+                    print(f"[PROCESS] Partial file kept: {video_path} ({size_mb:.1f} MB)", file=sys.stderr)
         conn.close()
         print(f"[PROCESS] Completed. Started {total} downloads, skipped {skipped} (already in DB). List: {list_path}", file=sys.stderr)
         return 0
