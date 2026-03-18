@@ -2409,6 +2409,7 @@ def _download_direct_http(
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
             chunk_size = 256 * 1024
+            start_time = time.time()
             output_path.parent.mkdir(parents=True, exist_ok=True)
             with open(output_path, "wb") as f:
                 while True:
@@ -2420,14 +2421,22 @@ def _download_direct_http(
                         break
                     f.write(chunk)
                     downloaded += len(chunk)
+                    elapsed = time.time() - start_time
                     if total > 0:
                         pct = downloaded * 100 // total
                         mb = downloaded / (1024 * 1024)
                         total_mb = total / (1024 * 1024)
-                        msg = f"{pct}% ({mb:.1f}/{total_mb:.1f} MB)"
+                        speed_mbs = (downloaded / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+                        if speed_mbs > 0 and downloaded < total:
+                            eta_sec = int((total - downloaded) / (downloaded / elapsed))
+                            eta_str = f"{eta_sec // 3600}:{(eta_sec % 3600) // 60:02d}:{eta_sec % 60:02d}" if eta_sec >= 3600 else f"{eta_sec // 60}:{eta_sec % 60:02d}"
+                            msg = f"{pct}% ({mb:.1f}/{total_mb:.1f} MB) {speed_mbs:.2f} MB/s ETA {eta_str}"
+                        else:
+                            msg = f"{pct}% ({mb:.1f}/{total_mb:.1f} MB)"
                     else:
                         mb = downloaded / (1024 * 1024)
-                        msg = f"{mb:.1f} MB downloaded"
+                        speed_mbs = mb / elapsed if elapsed > 0 else 0
+                        msg = f"{mb:.1f} MB downloaded" + (f" {speed_mbs:.2f} MB/s" if speed_mbs > 0 else "")
                     if progress_callback:
                         try:
                             progress_callback(msg)
