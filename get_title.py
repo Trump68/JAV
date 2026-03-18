@@ -354,6 +354,12 @@ def main() -> int:
         action="store_true",
         help="With --process-list: download even if the video is already in the DB (re-download).",
     )
+    parser.add_argument(
+        "--censored",
+        action="store_true",
+        help="With --process-list: process entries with empty labels (censored). "
+             "Folder: CODE C [DATE], file: CODE.m4v.",
+    )
     args = parser.parse_args()
     use_visual = args.visual and not getattr(args, "no_visual", False)
 
@@ -389,18 +395,25 @@ def main() -> int:
             url, code, date, labels = parts
             if not url or not code:
                 continue
-            if "reducing mosaic" not in labels.lower():
-                continue
-            type_str = "Reducing Mosaic"
+            if args.censored:
+                if labels.strip():
+                    continue
+                type_str = "Censored"
+                date_str = date or ""
+                folder_name = f"{code} C [{date_str}]" if date_str else f"{code} C"
+                filename = f"{code}.m4v"
+            else:
+                if "reducing mosaic" not in labels.lower():
+                    continue
+                type_str = "Reducing Mosaic"
+                date_str = date or ""
+                folder_name = f"{code} UNC [{date_str}]" if date_str else f"{code} UNC"
+                filename = f"{code}_UNCENSORED.m4v"
             if not getattr(args, "redownload", False) and _already_downloaded(conn, code, type_str, date):
                 print(f"[PROCESS] {idx}: skip (already in DB) {code} {date}", file=sys.stderr)
                 skipped += 1
                 continue
             total += 1
-            # Folder name: CODE UNC [DATE]
-            date_str = date or ""
-            folder_name = f"{code} UNC [{date_str}]" if date_str else f"{code} UNC"
-            filename = f"{code}_UNCENSORED.m4v"
             output_path_arg = f"{cast_slug}/{folder_name}/{filename}"
             print(f"[PROCESS] {idx}: {url} -> {output_path_arg}", file=sys.stderr)
             dodnld_cmd = [sys.executable, str(dodnld_py), url, "-o", output_path_arg]
