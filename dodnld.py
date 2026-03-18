@@ -474,10 +474,13 @@ PLAYER_IFRAME_SRC_SUBSTRINGS = (
 
 
 def _frame_is_player_iframe(frame) -> bool:
-    """True if frame is an iframe with player src (not ad). Main frame is excluded — player is in iframe."""
+    """True if frame is an iframe with player src or current URL matching player domains."""
     if frame == frame.page.main_frame:
         return False
     try:
+        furl = (frame.url or "").lower()
+        if any(s in furl for s in PLAYER_IFRAME_SRC_SUBSTRINGS):
+            return True
         el = frame.frame_element()
         src = (el.get_attribute("src") or "").lower()
         return any(s in src for s in PLAYER_IFRAME_SRC_SUBSTRINGS)
@@ -1034,13 +1037,23 @@ def _log_stream_url(url: str, source: str = "capture") -> None:
 
 
 def _is_downloadable_stream_url(url: str | None) -> bool:
-    """True if URL can be used for download (yt-dlp etc). Streamtape /e/ embed is not downloadable — need get_video."""
+    """True if URL can be used for download (yt-dlp etc). Only actual video/stream URLs, not JS/GIF/CSS."""
     if not url:
         return False
     lower = url.lower()
     if "streamtape" in lower and "/e/" in lower and "get_video" not in lower:
         return False
-    return True
+    path_part = lower.split("?")[0]
+    _junk_exts = (".js", ".css", ".gif", ".png", ".jpg", ".jpeg", ".svg", ".webp", ".woff", ".woff2", ".json", ".ico")
+    if any(path_part.endswith(ext) for ext in _junk_exts):
+        return False
+    if ".m3u8" in lower or ".mp4" in lower or ".ts" in lower or "get_video" in lower or "tapecontent" in lower:
+        return True
+    if "edgeon-bandwidth" in lower or "urlset" in lower:
+        return True
+    if any(x in lower for x in ("video", "stream", "hls", "manifest", "playlist")):
+        return True
+    return False
 
 
 def run_visual_mode(
@@ -1215,6 +1228,7 @@ def run_visual_mode(
             def log(msg: str) -> None:
                 _visual_log(msg)
                 print(msg, file=sys.stderr)
+                sys.stderr.flush()
 
             from datetime import datetime as _dt
             timeline_entries: list[tuple[str, str]] = []
@@ -1233,13 +1247,15 @@ def run_visual_mode(
             timeline("goto_page")
 
             stream_url_for_download = [None]  # best m3u8 for download (HLS playlist, not jwplayer assets)
+            stream_referer_for_download = [None]  # actual Referer from browser request
             target_stream_seen_ref = [False]
 
             def _is_hls_playlist_url(url: str) -> bool:
                 if ".m3u8" not in url:
                     return False
                 lower = url.lower()
-                if "jwplayer" in lower or "/jwplayer/" in lower:
+                # Skip jwplayer JS/CSS etc, but accept m3u8 even from jwplayer paths (VOE/dianaavoidthey)
+                if ("jwplayer" in lower or "/jwplayer/" in lower) and ".m3u8" not in lower:
                     return False
                 # Segment URLs (not playlists): skip so we keep master/playlist only
                 if "_HLS_msn" in lower or "_HLS_part" in lower or "/segment" in lower or "segment/" in lower:
@@ -1263,6 +1279,23 @@ def run_visual_mode(
                     pass
                 return False
 
+            def _capture_request_referer(response):
+                """Extract Referer header from the browser request that produced this response."""
+                try:
+                    return response.request.headers.get("referer") or None
+                except Exception:
+                    return None
+
+            def _set_stream_url(url, response):
+                path_lower = url.lower().split("?")[0]
+                _junk = (".js", ".css", ".gif", ".png", ".jpg", ".jpeg", ".svg", ".webp", ".woff", ".woff2", ".ico")
+                if any(path_lower.endswith(ext) for ext in _junk):
+                    return
+                stream_url_for_download[0] = url
+                ref = _capture_request_referer(response)
+                if ref:
+                    stream_referer_for_download[0] = ref
+
             def on_response(response):
                 url = response.url
                 if not url.startswith("http"):
@@ -1278,24 +1311,24 @@ def run_visual_mode(
                 if not (is_stream_url(url) or is_media or is_st_tv_m3u8 or is_streamtape):
                     return
                 if _is_hls_playlist_url(url):
-                    stream_url_for_download[0] = url
+                    _set_stream_url(url, response)
                     timeline("stream_captured_m3u8")
                 elif is_st_tv_m3u8:
                     if "_HLS_msn" not in lower and "_HLS_part" not in lower and "segment" not in lower:
-                        stream_url_for_download[0] = url
+                        _set_stream_url(url, response)
                         timeline("stream_captured_m3u8_st_tv")
                 elif is_streamtape:
                     current = stream_url_for_download[0] or ""
                     if "get_video" in url.lower():
-                        stream_url_for_download[0] = url
+                        _set_stream_url(url, response)
                     elif "get_video" not in current.lower():
-                        stream_url_for_download[0] = url
+                        _set_stream_url(url, response)
                     timeline("stream_captured_streamtape")
                 if _is_target_stream_url(url):
                     target_stream_seen_ref[0] = True
                     timeline(f"TARGET_STREAM_APPEARED: {url}")
                     log("Target stream link appeared.")
-                    stream_url_for_download[0] = url
+                    _set_stream_url(url, response)
                     if auto_download and _is_downloadable_stream_url(url):
                         auto_download_pending_ref[0] = True
                 print(f"[STREAM] {url[:120]}{'...' if len(url) > 120 else ''}")
@@ -1322,6 +1355,11 @@ def run_visual_mode(
                     page.wait_for_selector('text=SERVER', timeout=8000)
                 except Exception:
                     pass
+                # Dismiss ad overlays before clicking any server tab
+                dismiss_ad_overlays(page)
+                for _ in range(3):
+                    try_close_ad_overlay(page)
+                    page.wait_for_timeout(200)
                 page.wait_for_timeout(500)
                 for try_tab in tabs_to_try:
                     tab_clicked = False
@@ -1460,6 +1498,92 @@ def run_visual_mode(
                 else:
                     log(f"server_tab_clicked: {server_tab}")
                     page.wait_for_timeout(3000)
+                # VOE: verify iframe loaded (page defaults to TV; first click may be eaten by ad overlay)
+                if server_tab == "VOE" and tab_clicked:
+                    _VOE_IFRAME_MARKERS = ("dianaavoidthey", "voe.sx", "voe-", "voeunblock", "guardianagainstyou")
+
+                    def _voe_iframe_loaded():
+                        for f in page.frames:
+                            if f == page.main_frame:
+                                continue
+                            furl = (f.url or "").lower()
+                            if any(m in furl for m in _VOE_IFRAME_MARKERS):
+                                return True
+                            try:
+                                el = f.frame_element()
+                                src = (el.get_attribute("src") or "").lower()
+                                if any(m in src for m in _VOE_IFRAME_MARKERS):
+                                    return True
+                            except Exception:
+                                pass
+                        # Also check for supremejav iframe that wraps VOE (not streamtape/turbo)
+                        for f in page.frames:
+                            if f == page.main_frame:
+                                continue
+                            furl = (f.url or "").lower()
+                            if "supremejav" in furl and "streamtape" not in furl and "turbo" not in furl:
+                                for sf in f.child_frames:
+                                    sfurl = (sf.url or "").lower()
+                                    if any(m in sfurl for m in _VOE_IFRAME_MARKERS):
+                                        return True
+                                # supremejav iframe loaded; VOE might be nested further
+                                if "jwplayer" in furl or len(f.child_frames) > 0:
+                                    return True
+                        return False
+
+                    if not _voe_iframe_loaded():
+                        log("VOE iframe not loaded after click, retrying with ad dismissal...")
+                        _voe_label_js = _click_tab_js.replace("'{}'".format(tabs_to_try[0].replace("\\", "\\\\").replace("'", "\\'")), "'VOE'") if tabs_to_try[0] != "VOE" else _click_tab_js
+                        # Rebuild JS specifically for VOE
+                        _voe_click_js = """() => {
+                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                            var btns = document.querySelectorAll('a.btn-server');
+                            for (var i = 0; i < btns.length; i++) {
+                                var a = btns[i];
+                                if ((a.textContent || a.innerText || '').trim() !== 'VOE') continue;
+                                var h = (a.getAttribute('href') || '').trim();
+                                if (adLike.test(h)) continue;
+                                a.scrollIntoView({ block: 'center' });
+                                a.click();
+                                return true;
+                            }
+                            return false;
+                        }"""
+                        for retry in range(5):
+                            dismiss_ad_overlays(page)
+                            try_close_ad_overlay(page)
+                            page.wait_for_timeout(500)
+                            # Close any popup windows opened by the ad click
+                            try:
+                                all_pages = context.pages
+                                if len(all_pages) > 1:
+                                    for p in all_pages[1:]:
+                                        try:
+                                            p.close()
+                                        except Exception:
+                                            pass
+                                    log(f"Closed {len(all_pages) - 1} popup tab(s)")
+                            except Exception:
+                                pass
+                            page.evaluate(_voe_click_js)
+                            page.wait_for_timeout(4000)
+                            if _voe_iframe_loaded():
+                                log(f"VOE iframe loaded after retry {retry + 1}")
+                                break
+                            # Also try Playwright native click
+                            try:
+                                btn = page.locator("a.btn-server").filter(has_text=re.compile(r"^VOE$")).first
+                                if btn.is_visible(timeout=1000):
+                                    btn.click(force=True)
+                                    page.wait_for_timeout(4000)
+                                    if _voe_iframe_loaded():
+                                        log(f"VOE iframe loaded after native click retry {retry + 1}")
+                                        break
+                            except Exception:
+                                pass
+                        if not _voe_iframe_loaded():
+                            log("VOE iframe failed to load after retries, will rely on click loop")
+
                 # ST: verify iframe loaded; if not, retry clicks
                 if server_tab == "ST" and tab_clicked:
                     def _st_iframe_loaded():
@@ -1581,12 +1705,14 @@ def run_visual_mode(
                             stopped_by_user_ref[0] = False
                             download_proc_ref.clear()
 
+                            dl_referer = stream_referer_for_download[0] or "https://supjav.com/"
+
                             def run_download():
                                 try:
                                     result = download_video(
                                         download_url,
                                         out_path,
-                                        referer="https://supjav.com/",
+                                        referer=dl_referer,
                                         progress_callback=progress_from_download_thread,
                                         out_proc=download_proc_ref,
                                         stopped_by_user=stopped_by_user_ref,
@@ -1628,6 +1754,7 @@ def run_visual_mode(
                                 download_finished_ref[0] = None
                                 download_data_flowing.clear()
                                 stream_url_for_download[0] = None
+                                stream_referer_for_download[0] = None
                                 target_stream_seen_ref[0] = False
                                 auto_download_pending_ref[0] = False
                                 server_tab = "ST"
@@ -1735,13 +1862,14 @@ def run_visual_mode(
                             out_path = DOWNLOAD_DIR / output_filename
                             stopped_by_user_ref[0] = False
                             download_proc_ref.clear()
+                            dl_referer = stream_referer_for_download[0] or "https://supjav.com/"
 
                             def run_download():
                                 try:
                                     result = download_video(
                                         download_url,
                                         out_path,
-                                        referer="https://supjav.com/",
+                                        referer=dl_referer,
                                         progress_callback=progress_from_download_thread,
                                         out_proc=download_proc_ref,
                                         stopped_by_user=stopped_by_user_ref,
@@ -1938,33 +2066,37 @@ def run_visual_mode(
                                 page.wait_for_timeout(400)
                             except Exception:
                                 pass
+                            def _have_downloadable_stream():
+                                u = stream_url_for_download[0]
+                                return bool(u and _is_downloadable_stream_url(u))
+
                             for attempt in range(30):  # ~30 * (2s + small overhead) ≈ 60 seconds
-                                if target_stream_seen_ref[0] or stream_url_for_download[0]:
-                                    _visual_log("auto_click_player: VOE — stream link available, breaking to start download")
-                                    if stream_url_for_download[0] and _is_downloadable_stream_url(stream_url_for_download[0]) and not auto_download_pending_ref[0]:
+                                if _have_downloadable_stream():
+                                    if not auto_download_pending_ref[0]:
                                         auto_download_pending_ref[0] = True
                                     break
+                                pass
                                 # keep overlays clean before each click burst
                                 for _ in range(2):
                                     try_close_ad_overlay(page)
                                     page.wait_for_timeout(150)
                                 # two clicks with 0.1s interval
+                                clicked = False
                                 for click_idx in range(2):
                                     if try_click_player(page):
-                                        timeline("auto_click_player_voe")
-                                        _visual_log(f"auto_click_player: VOE click burst #{attempt + 1} click {click_idx + 1}")
-                                    page.wait_for_timeout(100)  # 0.1 sec between clicks
-                                    if target_stream_seen_ref[0] or stream_url_for_download[0]:
+                                        clicked = True
+                                    page.wait_for_timeout(100)
+                                    if _have_downloadable_stream():
                                         break
-                                if target_stream_seen_ref[0] or stream_url_for_download[0]:
-                                    _visual_log("auto_click_player: VOE — stream detected after click burst")
-                                    if stream_url_for_download[0] and _is_downloadable_stream_url(stream_url_for_download[0]) and not auto_download_pending_ref[0]:
+                                pass
+                                if _have_downloadable_stream():
+                                    if not auto_download_pending_ref[0]:
                                         auto_download_pending_ref[0] = True
                                     break
                                 # wait 2 seconds before next burst
                                 page.wait_for_timeout(2_000)
-                            # timeout: no stream/link within ~60 seconds — try TV once, then stop with error
-                            if not target_stream_seen_ref[0] and not stream_url_for_download[0]:
+                            # timeout: no downloadable stream within ~60 seconds — try TV once, then stop with error
+                            if not _have_downloadable_stream():
                                 if not voe_failed_try_tv_ref[0]:
                                     voe_failed_try_tv_ref[0] = True
                                     _visual_log("auto_click_player: VOE — timeout 60s, no stream; trying TV...")
@@ -2366,6 +2498,15 @@ def download_video(
         out_arg = str(output_path)
     else:
         out_arg = str(output_path.with_suffix("")) + ".%(ext)s"
+    # Extract Origin from referer for CORS-protected CDNs (VOE/edgeon-bandwidth)
+    dl_origin = None
+    if dl_referer:
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(dl_referer)
+            dl_origin = f"{p.scheme}://{p.netloc}"
+        except Exception:
+            pass
     cmd = [
         sys.executable,
         "-u",
@@ -2376,10 +2517,10 @@ def download_video(
         "--no-part",
         "--add-header", f"Referer:{dl_referer}",
         "--user-agent", USER_AGENT,
-        "-o", out_arg,
-        url,
     ]
-    pass
+    if dl_origin:
+        cmd += ["--add-header", f"Origin:{dl_origin}"]
+    cmd += ["-o", out_arg, url]
     try:
         if progress_callback is not None:
             try:
