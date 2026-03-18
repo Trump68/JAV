@@ -23,3 +23,5 @@ download/
 .vscode/
 *.swp
 *.swo
+stream_urls.log
+stream_urls.log

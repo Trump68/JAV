@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from pathlib import Path
 from typing import Callable
 from urllib.parse import urljoin, urlparse
@@ -2452,6 +2453,17 @@ def _download_direct_http(
         start_time = time.time()
         downloaded = start_byte
         written_this_session = 0
+        # Streamtape (ST) tends to fluctuate; show speed/ETA based on the last N seconds
+        # rather than averaging from the beginning of the session.
+        is_streamtape_like = (
+            "streamtape" in url.lower()
+            or "tapecontent" in url.lower()
+            or (referer or "").lower().find("streamtape") >= 0
+        )
+        speed_window_seconds = 5 * 60
+        speed_window_samples: deque[tuple[float, int]] = deque()
+        if is_streamtape_like:
+            speed_window_samples.append((start_time, downloaded))
         with open(output_path, mode) as f:
             while True:
                 if stopped_by_user and stopped_by_user[0]:
@@ -2462,15 +2474,37 @@ def _download_direct_http(
                 f.write(chunk)
                 written_this_session += len(chunk)
                 downloaded = start_byte + written_this_session
-                elapsed = time.time() - start_time
+                now = time.time()
+                elapsed = now - start_time
                 if total > 0:
                     pct = downloaded * 100 // total
                     mb = downloaded / (1024 * 1024)
                     total_mb = total / (1024 * 1024)
-                    speed_mbs = (written_this_session / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-                    if speed_mbs > 0 and downloaded < total and written_this_session > 0:
-                        rate = written_this_session / elapsed
-                        eta_sec = int((total - downloaded) / rate) if rate > 0 else 0
+                    speed_mbs = 0.0
+                    eta_str = ""
+                    rate_bps = 0.0
+
+                    if is_streamtape_like and speed_window_samples is not None:
+                        # Sample at most once per second to keep deque small.
+                        if not speed_window_samples or (now - speed_window_samples[-1][0]) >= 1.0:
+                            speed_window_samples.append((now, downloaded))
+                        cutoff = now - speed_window_seconds
+                        while speed_window_samples and speed_window_samples[0][0] < cutoff:
+                            speed_window_samples.popleft()
+
+                        if len(speed_window_samples) >= 2:
+                            t0, b0 = speed_window_samples[0]
+                            dt = now - t0
+                            db = downloaded - b0
+                            if dt > 0 and db > 0:
+                                rate_bps = db / dt
+                                speed_mbs = (db / (1024 * 1024)) / dt
+                    else:
+                        speed_mbs = (written_this_session / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+                        rate_bps = written_this_session / elapsed if elapsed > 0 else 0
+
+                    if speed_mbs > 0 and downloaded < total and rate_bps > 0:
+                        eta_sec = int((total - downloaded) / rate_bps)
                         eta_str = f"{eta_sec // 3600}:{(eta_sec % 3600) // 60:02d}:{eta_sec % 60:02d}" if eta_sec >= 3600 else f"{eta_sec // 60}:{eta_sec % 60:02d}"
                         msg = f"{pct}% ({mb:.1f}/{total_mb:.1f} MB) {speed_mbs:.2f} MB/s ETA {eta_str}"
                     else:
