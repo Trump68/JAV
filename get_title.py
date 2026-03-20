@@ -409,6 +409,23 @@ def main() -> int:
                 date_str = date or ""
                 folder_name = f"{code} UNC [{date_str}]" if date_str else f"{code} UNC"
                 filename = f"{code}_UNCENSORED.m4v"
+
+            # If video + POSTER already exist, do not resume/re-download.
+            # POSTER is saved only after successful download in this script,
+            # so its presence is a strong signal that the download completed.
+            folder_dir = DOWNLOAD_DIR / cast_slug / folder_name
+            video_path = folder_dir / filename
+            poster_path = folder_dir / "POSTER.jpg"
+            if (
+                not getattr(args, "redownload", False)
+                and video_path.exists()
+                and poster_path.exists()
+                and _video_file_valid(video_path)
+            ):
+                print(f"[PROCESS] {idx}: skip (file+poster present) {code} {date}", file=sys.stderr)
+                skipped += 1
+                continue
+
             if not getattr(args, "redownload", False) and _already_downloaded(conn, code, type_str, date):
                 print(f"[PROCESS] {idx}: skip (already in DB) {code} {date}", file=sys.stderr)
                 skipped += 1
@@ -484,10 +501,21 @@ def main() -> int:
     dodnld_cmd = [sys.executable, str(dodnld_py), args.url, "-o", output_path_arg]
     if use_visual:
         dodnld_cmd.insert(-2, "--visual")
-    proc = subprocess.run(dodnld_cmd, cwd=str(script_dir))
     code_dir = DOWNLOAD_DIR / code
     code_dir.mkdir(parents=True, exist_ok=True)
     out_file = code_dir / f"{code}.txt"
+
+    video_path = code_dir / output_name
+    poster_path = code_dir / "POSTER.jpg"
+    if video_path.exists() and poster_path.exists() and _video_file_valid(video_path):
+        # Already complete: still refresh the text metadata file.
+        out_file.write_text(f"{title}\n{code}\n{cast}\n", encoding="utf-8")
+        print(title)
+        print(f"Already downloaded (file+poster present): {video_path}", file=sys.stderr)
+        print(f"Saved/updated: {out_file}", file=sys.stderr)
+        return 0
+
+    proc = subprocess.run(dodnld_cmd, cwd=str(script_dir))
     out_file.write_text(f"{title}\n{code}\n{cast}\n", encoding="utf-8")
     print(title)
     print(f"Saved: {out_file}", file=sys.stderr)

@@ -2453,6 +2453,18 @@ def _download_direct_http(
         start_time = time.time()
         downloaded = start_byte
         written_this_session = 0
+        bar_width = 30
+        last_rendered_pct: int | None = None
+        last_print_time = 0.0
+        last_line_len = 0
+
+        def _print_progress_line(line: str) -> None:
+            """Print progress in a single console line (overwrite with CR)."""
+            nonlocal last_line_len
+            pad = " " * max(0, last_line_len - len(line))
+            print("\r" + line + pad, end="", flush=True)
+            last_line_len = len(line)
+
         # Streamtape (ST) tends to fluctuate; show speed/ETA based on the last N seconds
         # rather than averaging from the beginning of the session.
         is_streamtape_like = (
@@ -2509,19 +2521,34 @@ def _download_direct_http(
                         msg = f"{pct}% ({mb:.1f}/{total_mb:.1f} MB) {speed_mbs:.2f} MB/s ETA {eta_str}"
                     else:
                         msg = f"{pct}% ({mb:.1f}/{total_mb:.1f} MB)"
+                    # Console single-line progress bar
+                    should_render = (last_rendered_pct != int(pct)) or (now - last_print_time >= 0.5)
+                    if should_render:
+                        filled = int(pct * bar_width / 100)
+                        filled = max(0, min(bar_width, filled))
+                        bar = "#" * filled + "-" * (bar_width - filled)
+                        if eta_str:
+                            line = f"[{bar}] {pct}% {mb:.1f}/{total_mb:.1f} MB {speed_mbs:.2f} MB/s ETA {eta_str}"
+                        else:
+                            line = f"[{bar}] {pct}% {mb:.1f}/{total_mb:.1f} MB"
+                        _print_progress_line(line)
+                        last_rendered_pct = int(pct)
+                        last_print_time = now
                 else:
                     mb = downloaded / (1024 * 1024)
                     speed_mbs = mb / elapsed if elapsed > 0 else 0
                     msg = f"{mb:.1f} MB downloaded" + (f" {speed_mbs:.2f} MB/s" if speed_mbs > 0 else "")
+                    if now - last_print_time >= 1.0:
+                        _print_progress_line(f"Downloaded {mb:.1f} MB ({speed_mbs:.2f} MB/s)")
+                        last_print_time = now
                 if progress_callback:
                     try:
                         progress_callback(msg)
                     except Exception:
                         pass
-                if written_this_session % (5 * 1024 * 1024) < chunk_size:
-                    print(msg)
-                    sys.stdout.flush()
         resp.close()
+        # Finish overwriting line with a newline so next output doesn't share the same line.
+        print()
         print(f"Download completed ({downloaded / (1024*1024):.1f} MB).")
         sys.stdout.flush()
         return True
@@ -2580,6 +2607,15 @@ def download_video(
     # Direct HTTP download for CDN URLs (tapecontent.net etc.) — yt-dlp hangs on these
     if "tapecontent" in url.lower() or (url.lower().endswith(".mp4") and "get_video" not in url.lower()):
         return _download_direct_http(url, output_path, dl_referer, progress_callback, stopped_by_user)
+    # yt-dlp branch: if the output file already exists, try to resume it.
+    # (yt-dlp `--continue` uses the existing file state where possible.)
+    try:
+        if output_path.exists() and output_path.stat().st_size > 0:
+            existing_mb = output_path.stat().st_size / (1024 * 1024)
+            print(f"Existing file found ({existing_mb:.1f} MB); attempting resume...", file=sys.stderr)
+            sys.stderr.flush()
+    except Exception:
+        pass
     if output_path.suffix:
         out_arg = str(output_path)
     else:
@@ -2638,14 +2674,46 @@ def download_video(
 
             stderr_thread = threading.Thread(target=read_stderr, daemon=True)
             stderr_thread.start()
+            bar_width = 30
+            last_line_len = 0
+
+            def _print_one_line(line: str) -> None:
+                nonlocal last_line_len
+                pad = " " * max(0, last_line_len - len(line))
+                print("\r" + line + pad, end="", flush=True, file=sys.stderr)
+                last_line_len = len(line)
+
             for line in proc.stdout:
-                print(line, end="", file=sys.stderr)
                 parsed = _parse_ytdlp_progress(line)
                 if parsed:
-                    try:
-                        progress_callback(parsed)
-                    except Exception:
-                        pass
+                    # Update UI callback with the parsed yt-dlp info.
+                    if progress_callback is not None:
+                        try:
+                            progress_callback(parsed)
+                        except Exception:
+                            pass
+
+                    # Render one-line progress bar in console.
+                    m = re.search(r"(\d+\.?\d*)%\s*(?:of\s|\s|$)", line)
+                    if m:
+                        pct_float = float(m.group(1))
+                        pct_int = max(0, min(100, int(pct_float)))
+                        filled = int(pct_int * bar_width / 100)
+                        filled = max(0, min(bar_width, filled))
+                        bar = "#" * filled + "-" * (bar_width - filled)
+                        # Strip leading "XX.X% · " from parsed to avoid duplication.
+                        suffix = parsed
+                        m2 = re.match(r"^\s*\d+\.?\d*%\s*·\s*(.*)$", parsed)
+                        if m2:
+                            suffix = m2.group(1).strip()
+                        _print_one_line(f"[{bar}] {pct_int}% {suffix}".rstrip())
+                    continue
+
+                # Non-progress yt-dlp output: print normally.
+                print(line, end="", file=sys.stderr)
+            # Ensure the progress bar line ends with newline.
+            if last_line_len:
+                print("", file=sys.stderr)
             stderr_thread.join(timeout=0.5)
             try:
                 proc.wait(timeout=600)
