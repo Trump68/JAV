@@ -1005,7 +1005,7 @@ def wait_for_player_page_loaded(page, timeout_ms: int = CLOUDFLARE_WAIT_MS) -> N
 
 
 PLAYER_CENTER_FILE = Path(__file__).resolve().parent / ".player_center.json"
-VISUAL_LOG_FILE = Path(__file__).resolve().parent / ".visual_mode.log"
+# VISUAL_LOG_FILE = Path(__file__).resolve().parent / ".visual_mode.log"  # disabled by request
 DOWNLOAD_DIR = Path(__file__).resolve().parent / "download"
 LAST_DOWNLOAD_URL_FILE = Path(__file__).resolve().parent / "last_download_url.txt"
 STREAM_URLS_LOG = Path(__file__).resolve().parent / "stream_urls.log"
@@ -1019,7 +1019,14 @@ TARGET_STREAM_URL_PARTS = (
 
 
 def _visual_log(msg: str, log_file: Path | None = None) -> None:
-    """Optional: append to visual log (disabled to reduce disk writes)."""
+    """File logging to .visual_mode.log disabled by request."""
+    # if log_file is None:
+    #     log_file = VISUAL_LOG_FILE
+    # try:
+    #     with open(log_file, "a", encoding="utf-8") as f:
+    #         f.write(msg + "\n")
+    # except Exception:
+    #     pass
     pass
 
 
@@ -1261,8 +1268,8 @@ def run_visual_mode(
             explicit_low_quality_seen_ref = [False]  # active tab produced explicit <720 streams
 
             def _tab_log(msg: str) -> None:
-                # Verbose diagnostics for current tab.
-                log(f"[{server_tab}] {msg}")
+                # Verbose per-tab diagnostics disabled in terminal by request.
+                return
 
             def _is_hls_playlist_url(url: str) -> bool:
                 if ".m3u8" not in url:
@@ -1366,7 +1373,9 @@ def run_visual_mode(
                 if not force:
                     q = _quality_from_url(url)
                     if q is not None and q < 720:
-                        explicit_low_quality_seen_ref[0] = True
+                        # Only track "only low quality" for FST — avoids stray CDN lines after switching to ST.
+                        if server_tab == "FST":
+                            explicit_low_quality_seen_ref[0] = True
                         _tab_log(f"reject low-quality {q}p: {url[:160]}")
                         return
                 new_score = _stream_candidate_score(url)
@@ -1464,16 +1473,20 @@ def run_visual_mode(
                         for _ in range(2):
                             try_close_ad_overlay(page)
                             page.wait_for_timeout(200)
-                    _tab_label_esc = re.escape(try_tab)
+                    _tab_label_re = re.compile(r"^" + re.escape(try_tab) + r"$", re.I)
                     # Build JS that clicks only a.btn-server with safe href (no ad domains) — use this FIRST for VOE/TV to avoid opening ads
                     _label_esc_js = try_tab.replace("\\", "\\\\").replace("'", "\\'")
                     _click_tab_js = f"""() => {{
                             var label = '{_label_esc_js}';
+                            var labelU = label.toUpperCase();
+                            function tabTxtNorm(s) {{
+                                return (s || '').replace(/\\s+/g, ' ').trim().toUpperCase();
+                            }}
                             var adLike = /ads?\\b|popads|popcash|exoclick|propeller|dillinger|cactushead|juicyads|trafficjunky|revcontent|taboola|outbrain|mgid\\.com|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
                             var btns = document.querySelectorAll('a.btn-server');
                             for (var i = 0; i < btns.length; i++) {{
                                 var a = btns[i];
-                                if ((a.textContent || a.innerText || '').trim() !== label) continue;
+                                if (tabTxtNorm(a.textContent || a.innerText) !== labelU) continue;
                                 var h = (a.getAttribute('href') || '').trim();
                                 if (adLike.test(h)) continue;
                                 a.scrollIntoView({{ block: 'center' }});
@@ -1484,11 +1497,12 @@ def run_visual_mode(
                             document.querySelectorAll('*').forEach(function(el) {{
                                 if (server) return;
                                 var t = (el.innerText || '').trim();
-                                if (t.indexOf('SERVER') >= 0 && t.indexOf(label) >= 0 && t.length < 150) {{
+                                var tu = t.toUpperCase();
+                                if (tu.indexOf('SERVER') >= 0 && tu.indexOf(labelU) >= 0 && t.length < 150) {{
                                     var links = el.querySelectorAll('a.btn-server');
                                     for (var j = 0; j < links.length; j++) {{
                                         var a = links[j];
-                                        if ((a.textContent || '').trim() !== label) continue;
+                                        if (tabTxtNorm(a.textContent || a.innerText) !== labelU) continue;
                                         if (adLike.test((a.getAttribute('href') || ''))) continue;
                                         a.scrollIntoView({{ block: 'center' }});
                                         a.click();
@@ -1517,7 +1531,7 @@ def run_visual_mode(
                     # Only if safe click failed: try Playwright locator (may hit ad if multiple VOE links)
                     if not tab_clicked:
                         try:
-                            btn = page.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
+                            btn = page.locator("a.btn-server").filter(has_text=_tab_label_re).first
                             if btn.is_visible(timeout=3000):
                                 btn.scroll_into_view_if_needed()
                                 page.wait_for_timeout(200)
@@ -1534,7 +1548,7 @@ def run_visual_mode(
                     if not tab_clicked:
                         for frame in page.frames:
                             try:
-                                btn = frame.locator("a.btn-server").filter(has_text=re.compile(r"^" + _tab_label_esc + r"$")).first
+                                btn = frame.locator("a.btn-server").filter(has_text=_tab_label_re).first
                                 if btn.is_visible(timeout=2000):
                                     btn.scroll_into_view_if_needed()
                                     page.wait_for_timeout(200)
@@ -2104,20 +2118,36 @@ def run_visual_mode(
                                     try_close_ad_overlay(page)
                                     # Find streamtape frame by frame.url (not by src attr — frame may have navigated)
                                     st_iframe = None
-                                    for frame in page.frames:
-                                        if frame == page.main_frame:
-                                            continue
-                                        try:
-                                            furl = frame.url or ""
-                                            if "streamtape" in furl.lower():
-                                                try:
-                                                    fel = frame.frame_element()
-                                                except Exception:
-                                                    fel = None
-                                                st_iframe = (frame, fel)
-                                                break
-                                        except Exception:
-                                            pass
+                                    try:
+                                        for sel in (
+                                            "iframe[src*='streamtape']",
+                                            "iframe[src*='streamtape.']",
+                                            "iframe[src*='supremejav']",
+                                        ):
+                                            loc = page.locator(sel).first
+                                            if loc.is_visible(timeout=600):
+                                                cf = loc.content_frame()
+                                                if cf:
+                                                    st_iframe = (cf, loc)
+                                                    break
+                                    except Exception:
+                                        pass
+                                    if not st_iframe:
+                                        for frame in page.frames:
+                                            if frame == page.main_frame:
+                                                continue
+                                            try:
+                                                furl = (frame.url or "").lower()
+                                                # ST embed often loads supremejav wrapper first; match _st_iframe_loaded.
+                                                if "streamtape" in furl or "supremejav" in furl:
+                                                    try:
+                                                        fel = frame.frame_element()
+                                                    except Exception:
+                                                        fel = None
+                                                    st_iframe = (frame, fel)
+                                                    break
+                                            except Exception:
+                                                pass
                                     if not st_iframe:
                                         page.wait_for_timeout(3000)
                                         continue
@@ -2221,7 +2251,7 @@ def run_visual_mode(
                         if server_tab == "VOE" and not voe_click_loop_done_ref[0]:
                             # VOE: pattern — in loop do 2 clicks with 0.1s between them, then wait 2s; on each step check if stream appeared
                             voe_click_loop_done_ref[0] = True
-                            _visual_log("auto_click_player: VOE — scroll up then 2-click pattern until stream appears (timeout ~30s)")
+                            _visual_log("auto_click_player: VOE — scroll up then 2-click pattern until stream appears (timeout ~20s)")
                             try:
                                 page.evaluate("window.scrollTo(0, 0); document.documentElement.scrollTop = 0; document.body.scrollTop = 0;")
                                 page.wait_for_timeout(400)
@@ -2231,7 +2261,7 @@ def run_visual_mode(
                                 u = stream_url_for_download[0]
                                 return bool(u and _is_downloadable_stream_url(u))
 
-                            for attempt in range(15):  # ~15 * (2s + small overhead) ≈ 30 seconds
+                            for attempt in range(10):  # ~10 * (2s + small overhead) ≈ 20 seconds
                                 if _have_downloadable_stream():
                                     if not auto_download_pending_ref[0]:
                                         auto_download_pending_ref[0] = True
@@ -2256,12 +2286,12 @@ def run_visual_mode(
                                     break
                                 # wait 2 seconds before next burst
                                 page.wait_for_timeout(2_000)
-                            # timeout: no downloadable stream within ~30 seconds — try TV once, then stop with error
+                            # timeout: no downloadable stream within ~20 seconds — try TV once, then stop with error
                             if not _have_downloadable_stream():
                                 if not voe_failed_try_tv_ref[0]:
                                     voe_failed_try_tv_ref[0] = True
-                                    _visual_log("auto_click_player: VOE — timeout 30s, no stream; trying TV...")
-                                    log("VOE: no stream within 30s, switching to TV...")
+                                    _visual_log("auto_click_player: VOE — timeout 20s, no stream; trying TV...")
+                                    log("VOE: no stream within 20s, switching to TV...")
                                     dismiss_ad_overlays(page)
                                     page.wait_for_timeout(500)
                                     try:
@@ -2321,10 +2351,12 @@ def run_visual_mode(
                                     log("VOE: no stream detected within 60 seconds; stopping with error.")
                                     stop_event.set()
                         elif server_tab != "VOE" and not tv_click_loop_done_ref[0] and auto_click_iters[0] >= 5:
-                            # TV / ST: same as VOE — loop with ~60s timeout; forbid navigation to other sites (go_back if left)
+                            # TV/ST keep ~60s timeout; FST is shorter (~30s) to fall back sooner.
                             tv_click_loop_done_ref[0] = True
-                            _visual_log(f"auto_click_player: {server_tab} — scroll + click pattern until stream (timeout ~60s)")
-                            for attempt in range(4):  # ~15–20s per attempt → ~60s total
+                            tab_attempts = 2 if server_tab == "FST" else 4
+                            tab_timeout_s = 30 if server_tab == "FST" else 60
+                            _visual_log(f"auto_click_player: {server_tab} — scroll + click pattern until stream (timeout ~{tab_timeout_s}s)")
+                            for attempt in range(tab_attempts):  # ~15s per attempt
                                 if target_stream_seen_ref[0] or stream_url_for_download[0]:
                                     _visual_log(f"auto_click_player: {server_tab} — stream link available")
                                     if stream_url_for_download[0] and _is_downloadable_stream_url(stream_url_for_download[0]) and not auto_download_pending_ref[0]:
@@ -2405,10 +2437,10 @@ def run_visual_mode(
                                         pass
                             if not target_stream_seen_ref[0] and not stream_url_for_download[0]:
                                 prev_tab = server_tab
-                                _switch_to_next_fallback("no stream within 60s")
+                                _switch_to_next_fallback(f"no stream within {tab_timeout_s}s")
                                 if server_tab == prev_tab:
-                                    _visual_log(f"auto_click_player: {server_tab} — timeout ~60s, no stream found, stopping with error")
-                                    log(f"{server_tab}: no stream detected within ~60 seconds; stopping with error.")
+                                    _visual_log(f"auto_click_player: {server_tab} — timeout ~{tab_timeout_s}s, no stream found, stopping with error")
+                                    log(f"{server_tab}: no stream detected within ~{tab_timeout_s} seconds; stopping with error.")
                                     stop_event.set()
                 except Exception as e:
                     _visual_log(f"loop_error: {e!r}")
@@ -2786,7 +2818,9 @@ def download_video(
     If progress_callback is given, call it with progress string during download.
     If out_proc is a list, the Popen process is appended so caller can kill it to stop and save.
     If stopped_by_user is set by caller when killing, we return True (partial file saved)."""
+    streamtape_retry_url = None
     if "streamtape" in url.lower() and "get_video" in url.lower():
+        streamtape_retry_url = url
         if progress_callback:
             try:
                 progress_callback("Resolving Streamtape get_video redirect...")
@@ -2800,6 +2834,7 @@ def download_video(
         else:
             print(f"Could not resolve get_video redirect, using as-is", file=sys.stderr)
     elif "streamtape.com/e/" in url or "streamtape.xyz/e/" in url:
+        streamtape_retry_url = url
         if progress_callback:
             try:
                 progress_callback("Resolving Streamtape embed...")
@@ -2822,7 +2857,15 @@ def download_video(
         dl_referer = "https://streamtape.com/"
     # Direct HTTP download for CDN URLs (tapecontent.net etc.) — yt-dlp hangs on these
     if "tapecontent" in url.lower() or (url.lower().endswith(".mp4") and "get_video" not in url.lower()):
-        return _download_direct_http(url, output_path, dl_referer, progress_callback, stopped_by_user)
+        ok = _download_direct_http(url, output_path, dl_referer, progress_callback, stopped_by_user)
+        if ok:
+            return True
+        # Some tapecontent hosts timeout from direct urllib path; retry via yt-dlp on original Streamtape URL.
+        if streamtape_retry_url:
+            print("Direct CDN download failed, retrying via yt-dlp on Streamtape URL...", file=sys.stderr)
+            url = streamtape_retry_url
+        else:
+            return False
     # yt-dlp branch: if the output file already exists, try to resume it.
     # (yt-dlp `--continue` uses the existing file state where possible.)
     try:
