@@ -30,6 +30,7 @@ except ImportError:
 DEFAULT_URL = "https://supjav.com/403831.html"
 PAGE_TIMEOUT_MS = 60_000
 PLAYER_TIMEOUT_MS = 15_000
+DEFAULT_DOWNLOAD_RETRIES = 20
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -1023,18 +1024,19 @@ def _visual_log(msg: str, log_file: Path | None = None) -> None:
 
 
 def _log_stream_url(url: str, source: str = "capture") -> None:
-    """Append stream URL to stream_urls.log (timestamp, source, url) for later analysis."""
-    from datetime import datetime
-    if not url or not url.strip():
-        return
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    line = f"{ts}\t{source}\t{url.strip()}\n"
-    try:
-        with open(STREAM_URLS_LOG, "a", encoding="utf-8") as f:
-            f.write(line)
-            f.flush()
-    except Exception:
-        pass
+    """File logging disabled by request."""
+    # from datetime import datetime
+    # if not url or not url.strip():
+    #     return
+    # ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    # line = f"{ts}\t{source}\t{url.strip()}\n"
+    # try:
+    #     with open(STREAM_URLS_LOG, "a", encoding="utf-8") as f:
+    #         f.write(line)
+    #         f.flush()
+    # except Exception:
+    #     pass
+    return
 
 
 def _is_downloadable_stream_url(url: str | None) -> bool:
@@ -1042,6 +1044,12 @@ def _is_downloadable_stream_url(url: str | None) -> bool:
     if not url:
         return False
     lower = url.lower()
+    blocked = (
+        "mc.yandex", "yandex.ru/watch", "yandex.com/watch", "google-analytics",
+        "googletagmanager", "doubleclick", "adservice", "tracking", "pixel",
+    )
+    if any(b in lower for b in blocked):
+        return False
     if "streamtape" in lower and "/e/" in lower and "get_video" not in lower:
         return False
     path_part = lower.split("?")[0]
@@ -1052,8 +1060,6 @@ def _is_downloadable_stream_url(url: str | None) -> bool:
         return True
     if "edgeon-bandwidth" in lower or "urlset" in lower:
         return True
-    if any(x in lower for x in ("video", "stream", "hls", "manifest", "playlist")):
-        return True
     return False
 
 
@@ -1062,6 +1068,7 @@ def run_visual_mode(
     auto_download: bool = True,
     output_filename: str = "video.m4v",
     server_tab: str = "VOE",
+    skip_st: bool = False,
 ) -> bool:
     """Open page in visible browser; click server_tab (VOE, ST, etc.) then dismiss ads. Returns True if download succeeded (done/stopped), False otherwise."""
     # When saving to a subdir (e.g. download/CODE/file.m4v), do not wipe download/; only ensure target dir exists
@@ -1250,6 +1257,12 @@ def run_visual_mode(
             stream_url_for_download = [None]  # best m3u8 for download (HLS playlist, not jwplayer assets)
             stream_referer_for_download = [None]  # actual Referer from browser request
             target_stream_seen_ref = [False]
+            stream_score_ref = [-1]
+            explicit_low_quality_seen_ref = [False]  # active tab produced explicit <720 streams
+
+            def _tab_log(msg: str) -> None:
+                # Verbose diagnostics for current tab.
+                log(f"[{server_tab}] {msg}")
 
             def _is_hls_playlist_url(url: str) -> bool:
                 if ".m3u8" not in url:
@@ -1287,12 +1300,80 @@ def run_visual_mode(
                 except Exception:
                     return None
 
-            def _set_stream_url(url, response):
+            def _is_ad_like_stream_url(url: str) -> bool:
+                lower = url.lower()
+                ad_tokens = (
+                    "/ads/", "ad_", "_ad", "preroll", "vast", "doubleclick", "googlesyndication",
+                    "adservice", "adserver", "promo", "banner", "tracking", "pixel",
+                )
+                return any(tok in lower for tok in ad_tokens)
+
+            def _is_analytics_redirect_url(url: str) -> bool:
+                lower = url.lower()
+                return (
+                    "mc.yandex" in lower
+                    or "yandex.ru/watch" in lower
+                    or "yandex.com/watch" in lower
+                    or "google-analytics" in lower
+                    or "googletagmanager" in lower
+                    or "doubleclick" in lower
+                )
+
+            def _quality_from_url(url: str) -> int | None:
+                lower = url.lower()
+                m = re.search(r"(\d{3,4})p", lower)
+                if not m:
+                    return None
+                try:
+                    return int(m.group(1))
+                except ValueError:
+                    return None
+
+            def _stream_candidate_score(url: str) -> int:
+                lower = url.lower()
+                score = 0
+                if ".m3u8" in lower:
+                    score += 80
+                if "master.m3u8" in lower or "urlset" in lower:
+                    score += 30
+                if "streamtape" in lower and "get_video" in lower:
+                    score += 100
+                # Prefer higher quality variants when present in URL (e.g. 240p/720p/1080p).
+                m = re.search(r"(\d{3,4})p", lower)
+                if m:
+                    try:
+                        score += int(m.group(1))
+                    except ValueError:
+                        pass
+                # Penalize ad-like links heavily.
+                if _is_ad_like_stream_url(lower):
+                    score -= 500
+                return score
+
+            def _set_stream_url(url, response, *, force: bool = False):
                 path_lower = url.lower().split("?")[0]
                 _junk = (".js", ".css", ".gif", ".png", ".jpg", ".jpeg", ".svg", ".webp", ".woff", ".woff2", ".ico")
                 if any(path_lower.endswith(ext) for ext in _junk):
+                    _tab_log(f"reject junk-ext: {url[:160]}")
                     return
-                stream_url_for_download[0] = url
+                if _is_analytics_redirect_url(url):
+                    _tab_log(f"reject analytics-redirect: {url[:160]}")
+                    return
+                if not force and _is_ad_like_stream_url(url):
+                    _tab_log(f"reject ad-like: {url[:160]}")
+                    return
+                # Reject explicit low-quality variants (<720p) for all tabs.
+                if not force:
+                    q = _quality_from_url(url)
+                    if q is not None and q < 720:
+                        explicit_low_quality_seen_ref[0] = True
+                        _tab_log(f"reject low-quality {q}p: {url[:160]}")
+                        return
+                new_score = _stream_candidate_score(url)
+                if force or stream_url_for_download[0] is None or new_score >= stream_score_ref[0]:
+                    stream_url_for_download[0] = url
+                    stream_score_ref[0] = new_score
+                    _tab_log(f"select score={new_score}: {url[:180]}")
                 ref = _capture_request_referer(response)
                 if ref:
                     stream_referer_for_download[0] = ref
@@ -1301,13 +1382,21 @@ def run_visual_mode(
                 url = response.url
                 if not url.startswith("http"):
                     return
-                if not url_not_skipped(url):
-                    return
-                is_media = bool(response.headers.get("content-type") and is_media_content_type(response.headers.get("content-type", "")))
                 lower = url.lower()
-                is_st_tv_m3u8 = server_tab in ("ST", "TV") and ".m3u8" in lower
+                is_media = bool(response.headers.get("content-type") and is_media_content_type(response.headers.get("content-type", "")))
+                # FST streams may come from domains that hit generic skip-substring filters.
+                # Do not drop those if they look like real media for active FST tab.
+                is_fst_media_candidate = server_tab == "FST" and (".m3u8" in lower or ".mp4" in lower or is_media)
+                if not url_not_skipped(url) and not is_fst_media_candidate:
+                    _tab_log(f"skip by url_not_skipped: {url[:160]}")
+                    return
+                is_st_tv_m3u8 = server_tab in ("ST", "TV", "FST") and ".m3u8" in lower
                 is_streamtape = "streamtape" in lower and (
                     ".m3u8" in lower or ".mp4" in lower or "get_video" in lower or "/file/" in lower or "/e/" in lower or is_media
+                )
+                _tab_log(
+                    f"resp ct_media={is_media} m3u8={'.m3u8' in lower} mp4={'.mp4' in lower} "
+                    f"cand={is_fst_media_candidate} url={url[:160]}"
                 )
                 if not (is_stream_url(url) or is_media or is_st_tv_m3u8 or is_streamtape):
                     return
@@ -1317,7 +1406,7 @@ def run_visual_mode(
                 elif is_st_tv_m3u8:
                     if "_HLS_msn" not in lower and "_HLS_part" not in lower and "segment" not in lower:
                         _set_stream_url(url, response)
-                        timeline("stream_captured_m3u8_st_tv")
+                        timeline("stream_captured_m3u8_st_tv_fst")
                 elif is_streamtape:
                     current = stream_url_for_download[0] or ""
                     if "get_video" in url.lower():
@@ -1329,7 +1418,7 @@ def run_visual_mode(
                     target_stream_seen_ref[0] = True
                     timeline(f"TARGET_STREAM_APPEARED: {url}")
                     log("Target stream link appeared.")
-                    _set_stream_url(url, response)
+                    _set_stream_url(url, response, force=True)
                     if auto_download and _is_downloadable_stream_url(url):
                         auto_download_pending_ref[0] = True
 
@@ -1347,6 +1436,11 @@ def run_visual_mode(
             timeline("remove_target_blank_done")
             page.wait_for_timeout(500)
             tabs_to_try = ["VOE", "TV", "FST", "ST"] if server_tab == "VOE" else [server_tab]
+            if skip_st:
+                tabs_to_try = [t for t in tabs_to_try if t != "ST"]
+                if server_tab == "ST":
+                    log("skip_st is enabled and server_tab=ST was requested; stopping.")
+                    return False
             log(f"server_tab_click_start (try: {tabs_to_try}) — only a.btn-server or SERVER block (avoid ad links)")
             log("server_tab_click_order: VOE-TV-FST-ST")
             tab_clicked = False
@@ -1497,6 +1591,8 @@ def run_visual_mode(
                     page.wait_for_timeout(300)
                 if not tab_clicked:
                     log(f"server_tab_not_visible (tried {tabs_to_try})")
+                    # No usable server tab on this page: fail fast so caller can skip this item.
+                    return False
                 else:
                     log(f"server_tab_clicked: {server_tab}")
                     page.wait_for_timeout(3000)
@@ -1670,6 +1766,52 @@ def run_visual_mode(
                 if text and any(c.isdigit() for c in text):
                     download_data_flowing.set()
 
+            def _switch_to_next_fallback(reason: str) -> None:
+                nonlocal server_tab
+                next_tab = None
+                if server_tab == "VOE" and not voe_failed_try_tv_ref[0]:
+                    voe_failed_try_tv_ref[0] = True
+                    next_tab = "TV"
+                elif server_tab == "TV" and not tv_failed_try_fst_ref[0]:
+                    tv_failed_try_fst_ref[0] = True
+                    next_tab = "FST"
+                elif server_tab == "FST" and not fst_failed_try_st_ref[0] and not skip_st:
+                    fst_failed_try_st_ref[0] = True
+                    next_tab = "ST"
+                if not next_tab:
+                    return
+                _visual_log(f"auto_click_player: {server_tab} — {reason}; trying {next_tab}...")
+                log(f"{server_tab}: {reason}, switching to {next_tab}...")
+                dismiss_ad_overlays(page)
+                page.wait_for_timeout(500)
+                try:
+                    clicked_next = page.evaluate("""() => {
+                        const target = "__TAB__";
+                        var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                        var btns = document.querySelectorAll('a.btn-server');
+                        for (var i = 0; i < btns.length; i++) {
+                            var a = btns[i];
+                            if ((a.textContent || a.innerText || '').trim().toUpperCase() !== target) continue;
+                            if (adLike.test((a.getAttribute('href') || '').trim())) continue;
+                            a.scrollIntoView({ block: 'center' });
+                            a.click();
+                            return true;
+                        }
+                        return false;
+                    }""".replace("__TAB__", next_tab))
+                    if clicked_next:
+                        page.wait_for_timeout(3000)
+                        server_tab = next_tab
+                        explicit_low_quality_seen_ref[0] = False
+                        tv_click_loop_done_ref[0] = False
+                        auto_click_iters[0] = 5
+                    else:
+                        log(f"{next_tab} tab not found; stopping with error.")
+                        stop_event.set()
+                except Exception as e:
+                    log(f"Failed to switch to {next_tab}: {e!r}; stopping.")
+                    stop_event.set()
+
             log("Ready. Click Download when stream is visible; click again to stop download.")
             while True:
                 poll_interval = 0.4 if download_proc_ref else 2.0
@@ -1707,7 +1849,7 @@ def run_visual_mode(
                                 LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
                             except Exception:
                                 pass
-                            log("Stream URL saved to stream_urls.log and last_download_url.txt")
+                            log("Stream URL saved to last_download_url.txt")
                             set_download_button_state("downloading")
                             log("Auto-download started. You can close the browser; download will continue.")
                             out_path = DOWNLOAD_DIR / output_filename
@@ -1790,7 +1932,10 @@ def run_visual_mode(
                                 except Exception:
                                     pass
                                 page.wait_for_timeout(5000)
+                                # Reset click-loop state so fallback tab gets its own timeout loop.
                                 page._st_click_loop_done = False
+                                tv_click_loop_done_ref[0] = False
+                                auto_click_iters[0] = 5
                                 continue
                             elif dl_failed:
                                 log("Download failed before data started flowing.")
@@ -1870,7 +2015,7 @@ def run_visual_mode(
                                 LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
                             except Exception:
                                 pass
-                            log("Stream URL saved to stream_urls.log and last_download_url.txt")
+                            log("Stream URL saved to last_download_url.txt")
                             set_download_button_state("downloading")
                             log("Download started. You can close the browser; download will continue.")
                             out_path = DOWNLOAD_DIR / output_filename
@@ -1936,6 +2081,8 @@ def run_visual_mode(
                                 on_player_page = True
                         except Exception:
                             pass
+                    if on_player_page and explicit_low_quality_seen_ref[0] and not stream_url_for_download[0]:
+                        _switch_to_next_fallback("only explicit <720 stream variants seen")
                     # Streamtape: if we have embed but no get_video yet, click play inside iframe to trigger it
                     if on_player_page and stream_url_for_download[0] and not _is_downloadable_stream_url(stream_url_for_download[0]):
                         if not getattr(page, "_st_click_loop_done", False):
@@ -2074,7 +2221,7 @@ def run_visual_mode(
                         if server_tab == "VOE" and not voe_click_loop_done_ref[0]:
                             # VOE: pattern — in loop do 2 clicks with 0.1s between them, then wait 2s; on each step check if stream appeared
                             voe_click_loop_done_ref[0] = True
-                            _visual_log("auto_click_player: VOE — scroll up then 2-click pattern until stream appears (timeout ~60s)")
+                            _visual_log("auto_click_player: VOE — scroll up then 2-click pattern until stream appears (timeout ~30s)")
                             try:
                                 page.evaluate("window.scrollTo(0, 0); document.documentElement.scrollTop = 0; document.body.scrollTop = 0;")
                                 page.wait_for_timeout(400)
@@ -2084,7 +2231,7 @@ def run_visual_mode(
                                 u = stream_url_for_download[0]
                                 return bool(u and _is_downloadable_stream_url(u))
 
-                            for attempt in range(30):  # ~30 * (2s + small overhead) ≈ 60 seconds
+                            for attempt in range(15):  # ~15 * (2s + small overhead) ≈ 30 seconds
                                 if _have_downloadable_stream():
                                     if not auto_download_pending_ref[0]:
                                         auto_download_pending_ref[0] = True
@@ -2109,12 +2256,12 @@ def run_visual_mode(
                                     break
                                 # wait 2 seconds before next burst
                                 page.wait_for_timeout(2_000)
-                            # timeout: no downloadable stream within ~60 seconds — try TV once, then stop with error
+                            # timeout: no downloadable stream within ~30 seconds — try TV once, then stop with error
                             if not _have_downloadable_stream():
                                 if not voe_failed_try_tv_ref[0]:
                                     voe_failed_try_tv_ref[0] = True
-                                    _visual_log("auto_click_player: VOE — timeout 60s, no stream; trying TV...")
-                                    log("VOE: no stream within 60s, switching to TV...")
+                                    _visual_log("auto_click_player: VOE — timeout 30s, no stream; trying TV...")
+                                    log("VOE: no stream within 30s, switching to TV...")
                                     dismiss_ad_overlays(page)
                                     page.wait_for_timeout(500)
                                     try:
@@ -2136,32 +2283,36 @@ def run_visual_mode(
                                             server_tab = "TV"
                                             auto_click_iters[0] = 5
                                         else:
-                                            log("TV tab not found; trying ST fallback...")
-                                            # Try ST once before giving up.
-                                            try:
-                                                clicked_st = page.evaluate("""() => {
-                                                    var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
-                                                    var btns = document.querySelectorAll('a.btn-server');
-                                                    for (var i = 0; i < btns.length; i++) {
-                                                        var a = btns[i];
-                                                        if ((a.textContent || a.innerText || '').trim().toUpperCase() !== 'ST') continue;
-                                                        if (adLike.test((a.getAttribute('href') || '').trim())) continue;
-                                                        a.scrollIntoView({ block: 'center' });
-                                                        a.click();
-                                                        return true;
-                                                    }
-                                                    return false;
-                                                }""")
-                                                if clicked_st:
-                                                    page.wait_for_timeout(3000)
-                                                    server_tab = "ST"
-                                                    auto_click_iters[0] = 5
-                                                else:
-                                                    log("ST tab not found; stopping with error.")
-                                                    stop_event.set()
-                                            except Exception as e:
-                                                log(f"Failed ST fallback after TV not found: {e!r}; stopping.")
+                                            if skip_st:
+                                                log("TV tab not found; skip_st enabled, stopping with error.")
                                                 stop_event.set()
+                                            else:
+                                                log("TV tab not found; trying ST fallback...")
+                                                # Try ST once before giving up.
+                                                try:
+                                                    clicked_st = page.evaluate("""() => {
+                                                        var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                                                        var btns = document.querySelectorAll('a.btn-server');
+                                                        for (var i = 0; i < btns.length; i++) {
+                                                            var a = btns[i];
+                                                            if ((a.textContent || a.innerText || '').trim().toUpperCase() !== 'ST') continue;
+                                                            if (adLike.test((a.getAttribute('href') || '').trim())) continue;
+                                                            a.scrollIntoView({ block: 'center' });
+                                                            a.click();
+                                                            return true;
+                                                        }
+                                                        return false;
+                                                    }""")
+                                                    if clicked_st:
+                                                        page.wait_for_timeout(3000)
+                                                        server_tab = "ST"
+                                                        auto_click_iters[0] = 5
+                                                    else:
+                                                        log("ST tab not found; stopping with error.")
+                                                        stop_event.set()
+                                                except Exception as e:
+                                                    log(f"Failed ST fallback after TV not found: {e!r}; stopping.")
+                                                    stop_event.set()
                                     except Exception as e:
                                         log(f"Failed to switch to TV: {e!r}; stopping.")
                                         stop_event.set()
@@ -2231,6 +2382,9 @@ def run_visual_mode(
                                     if stream_url_for_download[0] and _is_downloadable_stream_url(stream_url_for_download[0]) and not auto_download_pending_ref[0]:
                                         auto_download_pending_ref[0] = True
                                     break
+                                if explicit_low_quality_seen_ref[0] and not stream_url_for_download[0]:
+                                    _visual_log(f"auto_click_player: {server_tab} — only explicit <720 seen; switching to next fallback")
+                                    break
                                 if not target_stream_seen_ref[0]:
                                     if try_click_player(page):
                                         _visual_log("auto_click_player: extra click (stream not found)")
@@ -2250,69 +2404,9 @@ def run_visual_mode(
                                     except Exception:
                                         pass
                             if not target_stream_seen_ref[0] and not stream_url_for_download[0]:
-                                if server_tab == "TV" and not tv_failed_try_fst_ref[0]:
-                                    tv_failed_try_fst_ref[0] = True
-                                    _visual_log("auto_click_player: TV — timeout 60s, no stream; trying FST...")
-                                    log("TV: no stream within 60s, switching to FST...")
-                                    dismiss_ad_overlays(page)
-                                    page.wait_for_timeout(500)
-                                    try:
-                                        clicked_fst = page.evaluate("""() => {
-                                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
-                                            var btns = document.querySelectorAll('a.btn-server');
-                                            for (var i = 0; i < btns.length; i++) {
-                                                var a = btns[i];
-                                                if ((a.textContent || a.innerText || '').trim().toUpperCase() !== 'FST') continue;
-                                                if (adLike.test((a.getAttribute('href') || '').trim())) continue;
-                                                a.scrollIntoView({ block: 'center' });
-                                                a.click();
-                                                return true;
-                                            }
-                                            return false;
-                                        }""")
-                                        if clicked_fst:
-                                            page.wait_for_timeout(3000)
-                                            server_tab = "FST"
-                                            tv_click_loop_done_ref[0] = False
-                                            auto_click_iters[0] = 5
-                                        else:
-                                            log("FST tab not found; stopping with error.")
-                                            stop_event.set()
-                                    except Exception as e:
-                                        log(f"Failed to switch to FST: {e!r}; stopping.")
-                                        stop_event.set()
-                                elif server_tab == "FST" and not fst_failed_try_st_ref[0]:
-                                    fst_failed_try_st_ref[0] = True
-                                    _visual_log("auto_click_player: FST — timeout 60s, no stream; trying ST...")
-                                    log("FST: no stream within 60s, switching to ST...")
-                                    dismiss_ad_overlays(page)
-                                    page.wait_for_timeout(500)
-                                    try:
-                                        clicked_st = page.evaluate("""() => {
-                                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
-                                            var btns = document.querySelectorAll('a.btn-server');
-                                            for (var i = 0; i < btns.length; i++) {
-                                                var a = btns[i];
-                                                if ((a.textContent || a.innerText || '').trim().toUpperCase() !== 'ST') continue;
-                                                if (adLike.test((a.getAttribute('href') || '').trim())) continue;
-                                                a.scrollIntoView({ block: 'center' });
-                                                a.click();
-                                                return true;
-                                            }
-                                            return false;
-                                        }""")
-                                        if clicked_st:
-                                            page.wait_for_timeout(3000)
-                                            server_tab = "ST"
-                                            tv_click_loop_done_ref[0] = False
-                                            auto_click_iters[0] = 5
-                                        else:
-                                            log("ST tab not found; stopping with error.")
-                                            stop_event.set()
-                                    except Exception as e:
-                                        log(f"Failed to switch to ST: {e!r}; stopping.")
-                                        stop_event.set()
-                                else:
+                                prev_tab = server_tab
+                                _switch_to_next_fallback("no stream within 60s")
+                                if server_tab == prev_tab:
                                     _visual_log(f"auto_click_player: {server_tab} — timeout ~60s, no stream found, stopping with error")
                                     log(f"{server_tab}: no stream detected within ~60 seconds; stopping with error.")
                                     stop_event.set()
@@ -2353,17 +2447,24 @@ def _parse_ytdlp_progress(line: str) -> str | None:
     pct = m.group(1)
     speed = ""
     eta = ""
+    total = ""
+    tm = re.search(r"\bof\s+([0-9]*\.?[0-9]+\s*[KMG]i?B)\b", line, re.I)
+    if tm:
+        total = tm.group(1).replace(" ", "")
     sm = re.search(r"at\s+([^\s]+)", line)
     if sm:
         speed = sm.group(1).strip()
     em = re.search(r"ETA\s+([^\s]+)", line)
     if em:
         eta = em.group(1).strip()
-    if speed and eta:
-        return f"{pct}% · {speed} · ETA {eta}"
+    parts: list[str] = [f"{pct}%"]
+    if total:
+        parts.append(f"of {total}")
     if speed:
-        return f"{pct}% · {speed}"
-    return f"{pct}%"
+        parts.append(speed)
+    if eta:
+        parts.append(f"ETA {eta}")
+    return " · ".join(parts)
 
 
 def resolve_streamtape_direct_url(embed_url: str, referer: str = "https://supjav.com/") -> str | None:
@@ -2633,6 +2734,46 @@ def _yt_dlp_suppress_log_line(line: str) -> bool:
     return bool(re.match(r"\s*\[generic\]", line, re.I))
 
 
+def _find_downloaded_output_file(output_path: Path) -> Path | None:
+    """Best-effort resolution of the final downloaded file path for size reporting."""
+    if output_path.exists():
+        return output_path
+    try:
+        # If output path has no suffix, yt-dlp may create output_path + ".ext"
+        if not output_path.suffix:
+            candidates = list(output_path.parent.glob(output_path.name + ".*"))
+            if candidates:
+                candidates.sort(key=lambda p: p.stat().st_size if p.exists() else 0, reverse=True)
+                return candidates[0]
+        else:
+            # Fallback: same stem with any extension
+            candidates = list(output_path.parent.glob(output_path.stem + ".*"))
+            if candidates:
+                candidates.sort(key=lambda p: p.stat().st_size if p.exists() else 0, reverse=True)
+                return candidates[0]
+    except Exception:
+        pass
+    return None
+
+
+def _report_final_file_size(output_path: Path, progress_callback: Callable[[str], None] | None = None) -> None:
+    """Print final downloaded file size and notify callback if present."""
+    final_file = _find_downloaded_output_file(output_path)
+    if not final_file or not final_file.exists():
+        return
+    try:
+        size_mb = final_file.stat().st_size / (1024 * 1024)
+        msg = f"Final file size: {size_mb:.1f} MB ({final_file.name})"
+        print(msg, file=sys.stderr)
+        if progress_callback is not None:
+            try:
+                progress_callback(msg)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 def download_video(
     url: str,
     output_path: str | Path,
@@ -2713,6 +2854,8 @@ def download_video(
         "--newline",
         "--no-part",
         "--continue",
+        "--retries", str(DEFAULT_DOWNLOAD_RETRIES),
+        "--fragment-retries", str(DEFAULT_DOWNLOAD_RETRIES),
         "--add-header", f"Referer:{dl_referer}",
         "--user-agent", USER_AGENT,
     ]
@@ -2742,11 +2885,29 @@ def download_video(
                 out_proc.append(proc)
             assert proc.stdout is not None
             assert proc.stderr is not None
+            stderr_activity_notified = [False]
 
             def read_stderr():
                 for line in proc.stderr:
                     if _yt_dlp_suppress_log_line(line):
                         continue
+                    # Some extractors (notably FST/HLS via ffmpeg) report activity mostly in stderr.
+                    # Notify caller once so "waiting for data flow" does not false-timeout.
+                    if (
+                        not stderr_activity_notified[0]
+                        and progress_callback is not None
+                        and (
+                            "frame=" in line
+                            or "Input #0, hls" in line
+                            or "Opening '" in line
+                            or "Destination:" in line
+                        )
+                    ):
+                        try:
+                            progress_callback("0% · starting")
+                            stderr_activity_notified[0] = True
+                        except Exception:
+                            pass
                     print(line, end="", file=sys.stderr)
 
             stderr_thread = threading.Thread(target=read_stderr, daemon=True)
@@ -2806,6 +2967,7 @@ def download_video(
             if proc.returncode != 0:
                 print(f"Download failed (exit {proc.returncode})", file=sys.stderr)
                 return False
+            _report_final_file_size(output_path, progress_callback)
             return True
         # Same as above but without progress parsing (still filter noisy [generic] lines).
         env = os.environ.copy()
@@ -2846,6 +3008,7 @@ def download_video(
         if proc2.returncode != 0:
             print(f"Download failed (exit {proc2.returncode})", file=sys.stderr)
             return False
+        _report_final_file_size(output_path, progress_callback)
         return True
     except subprocess.CalledProcessError as e:
         print(f"Download failed (exit {e.returncode}): {e.stderr or e.stdout or str(e)}", file=sys.stderr)
@@ -2896,6 +3059,11 @@ def main() -> int:
         metavar="TAB",
         help="Server tab: VOE (default: try VOE then TV then FST then ST), or ST, TV, FST",
     )
+    parser.add_argument(
+        "--skip-st",
+        action="store_true",
+        help="Skip any ST tab attempts in fallback chain and default VOE order.",
+    )
     args = parser.parse_args()
 
     if args.visual:
@@ -2904,6 +3072,7 @@ def main() -> int:
             auto_download=not getattr(args, "no_auto_download", False),
             output_filename=args.output,
             server_tab=args.server_tab,
+            skip_st=getattr(args, "skip_st", False),
         )
         return 0 if ok else 1
 

@@ -369,6 +369,11 @@ def main() -> int:
         help="With --process-list: process entries with empty labels (censored). "
              "Folder: CODE C [DATE], file: CODE.m4v.",
     )
+    parser.add_argument(
+        "--skip-st",
+        action="store_true",
+        help="Pass through to dodnld.py: skip any ST fallback attempts.",
+    )
     args = parser.parse_args()
     use_visual = args.visual and not getattr(args, "no_visual", False)
 
@@ -445,6 +450,8 @@ def main() -> int:
             dodnld_cmd = [sys.executable, str(dodnld_py), url, "-o", output_path_arg]
             if use_visual:
                 dodnld_cmd.insert(-2, "--visual")
+            if getattr(args, "skip_st", False):
+                dodnld_cmd.insert(-2, "--skip-st")
             proc = subprocess.run(dodnld_cmd, cwd=str(script_dir))
             if proc.returncode == 0:
                 folder_dir = DOWNLOAD_DIR / cast_slug / folder_name
@@ -502,6 +509,8 @@ def main() -> int:
     dodnld_cmd = [sys.executable, str(dodnld_py), args.url, "-o", output_path_arg]
     if use_visual:
         dodnld_cmd.insert(-2, "--visual")
+    if getattr(args, "skip_st", False):
+        dodnld_cmd.insert(-2, "--skip-st")
     code_dir = DOWNLOAD_DIR / code
     code_dir.mkdir(parents=True, exist_ok=True)
     out_file = code_dir / f"{code}.txt"
