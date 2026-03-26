@@ -1005,7 +1005,7 @@ def wait_for_player_page_loaded(page, timeout_ms: int = CLOUDFLARE_WAIT_MS) -> N
 
 
 PLAYER_CENTER_FILE = Path(__file__).resolve().parent / ".player_center.json"
-# VISUAL_LOG_FILE = Path(__file__).resolve().parent / ".visual_mode.log"  # disabled by request
+VISUAL_LOG_FILE = Path(__file__).resolve().parent / ".visual_mode.log"
 DOWNLOAD_DIR = Path(__file__).resolve().parent / "download"
 LAST_DOWNLOAD_URL_FILE = Path(__file__).resolve().parent / "last_download_url.txt"
 STREAM_URLS_LOG = Path(__file__).resolve().parent / "stream_urls.log"
@@ -1019,30 +1019,34 @@ TARGET_STREAM_URL_PARTS = (
 
 
 def _visual_log(msg: str, log_file: Path | None = None) -> None:
-    """File logging to .visual_mode.log disabled by request."""
-    # if log_file is None:
-    #     log_file = VISUAL_LOG_FILE
-    # try:
-    #     with open(log_file, "a", encoding="utf-8") as f:
-    #         f.write(msg + "\n")
-    # except Exception:
-    #     pass
-    pass
+    """Append timestamped lines to .visual_mode.log for post-run analysis."""
+    if log_file is None:
+        log_file = VISUAL_LOG_FILE
+    try:
+        from datetime import datetime
+
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        with open(log_file, "a", encoding="utf-8") as f:
+            f.write(f"{ts}\t{msg}\n")
+            f.flush()
+    except Exception:
+        pass
 
 
 def _log_stream_url(url: str, source: str = "capture") -> None:
-    """File logging disabled by request."""
-    # from datetime import datetime
-    # if not url or not url.strip():
-    #     return
-    # ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-    # line = f"{ts}\t{source}\t{url.strip()}\n"
-    # try:
-    #     with open(STREAM_URLS_LOG, "a", encoding="utf-8") as f:
-    #         f.write(line)
-    #         f.flush()
-    # except Exception:
-    #     pass
+    """Append captured stream URLs to stream_urls.log."""
+    from datetime import datetime
+
+    if not url or not url.strip():
+        return
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    line = f"{ts}\t{source}\t{url.strip()}\n"
+    try:
+        with open(STREAM_URLS_LOG, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+    except Exception:
+        pass
     return
 
 
@@ -1078,6 +1082,21 @@ def run_visual_mode(
     skip_st: bool = False,
 ) -> bool:
     """Open page in visible browser; click server_tab (VOE, ST, etc.) then dismiss ads. Returns True if download succeeded (done/stopped), False otherwise."""
+    requested_server_tab = str(server_tab).upper()
+    # Default VOE tries VOE→TV→FST→ST. With -s FST / -s ST / -s TV stay on that tab (no auto-fallback).
+    user_picked_single_tab = requested_server_tab != "VOE"
+    try:
+        from datetime import datetime
+
+        with open(VISUAL_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write("\n" + "=" * 72 + "\n")
+            f.write(
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}\tSESSION_START\t"
+                f"url={page_url}\tserver_tab={server_tab}\tauto_download={auto_download}\n"
+            )
+            f.flush()
+    except Exception:
+        pass
     # When saving to a subdir (e.g. download/CODE/file.m4v), do not wipe download/; only ensure target dir exists
     DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
     out_path = DOWNLOAD_DIR / output_filename
@@ -1266,12 +1285,38 @@ def run_visual_mode(
             target_stream_seen_ref = [False]
             stream_score_ref = [-1]
             explicit_low_quality_seen_ref = [False]  # active tab produced explicit <720 streams
+            # Must exist before page.on("response") — handlers can run during page.goto.
+            auto_download_pending_ref: list = [False]
+            download_proc_ref: list = []
+            stopped_by_user_ref: list = [False]
+            download_progress_text_ref: list = [None]
+            download_finished_ref: list = [None]
+            download_thread_ref: list = [None]
+            visual_auto_download_started_ref: list = [False]
+            # fst vs FST breaks on_response (is_st_tv_m3u8, FST bypass) — align with CLI.
+            server_tab = requested_server_tab
 
             def _tab_log(msg: str) -> None:
-                # Verbose per-tab diagnostics disabled in terminal by request.
-                return
+                _visual_log(f"[tab] {msg}")
+
+            def _is_fst_hls_txt_playlist_url(url: str) -> bool:
+                """FST embeds (e.g. fc2stream) may serve HLS manifests as master.txt / index-*.txt under .urlset/ (not .m3u8)."""
+                lower = url.lower()
+                path = lower.split("?")[0].rstrip("/")
+                if not path.endswith(".txt"):
+                    return False
+                if "urlset" not in lower:
+                    return False
+                base = path.rsplit("/", 1)[-1]
+                if base.startswith("seg-") or re.match(r"^seg-\d+", base):
+                    return False
+                if base == "master.txt" or base.startswith("index"):
+                    return True
+                return False
 
             def _is_hls_playlist_url(url: str) -> bool:
+                if _is_fst_hls_txt_playlist_url(url):
+                    return True
                 if ".m3u8" not in url:
                     return False
                 lower = url.lower()
@@ -1339,7 +1384,7 @@ def run_visual_mode(
             def _stream_candidate_score(url: str) -> int:
                 lower = url.lower()
                 score = 0
-                if ".m3u8" in lower:
+                if _is_hls_playlist_url(url) or ".m3u8" in lower:
                     score += 80
                 if "master.m3u8" in lower or "urlset" in lower:
                     score += 30
@@ -1395,7 +1440,9 @@ def run_visual_mode(
                 is_media = bool(response.headers.get("content-type") and is_media_content_type(response.headers.get("content-type", "")))
                 # FST streams may come from domains that hit generic skip-substring filters.
                 # Do not drop those if they look like real media for active FST tab.
-                is_fst_media_candidate = server_tab == "FST" and (".m3u8" in lower or ".mp4" in lower or is_media)
+                is_fst_media_candidate = server_tab == "FST" and (
+                    ".m3u8" in lower or ".mp4" in lower or is_media or _is_fst_hls_txt_playlist_url(url)
+                )
                 if not url_not_skipped(url) and not is_fst_media_candidate:
                     _tab_log(f"skip by url_not_skipped: {url[:160]}")
                     return
@@ -1407,7 +1454,7 @@ def run_visual_mode(
                     f"resp ct_media={is_media} m3u8={'.m3u8' in lower} mp4={'.mp4' in lower} "
                     f"cand={is_fst_media_candidate} url={url[:160]}"
                 )
-                if not (is_stream_url(url) or is_media or is_st_tv_m3u8 or is_streamtape):
+                if not (is_stream_url(url) or is_media or is_st_tv_m3u8 or is_streamtape or _is_fst_hls_txt_playlist_url(url)):
                     return
                 if _is_hls_playlist_url(url):
                     _set_stream_url(url, response)
@@ -1430,8 +1477,20 @@ def run_visual_mode(
                     _set_stream_url(url, response, force=True)
                     if auto_download and _is_downloadable_stream_url(url):
                         auto_download_pending_ref[0] = True
+                # doppiocdn / Streamtape rarely match TARGET_STREAM_URL_PARTS — arm auto-download for any active server tab.
+                if (
+                    auto_download
+                    and server_tab in ("ST", "TV", "FST", "VOE")
+                    and stream_url_for_download[0]
+                    and _is_downloadable_stream_url(stream_url_for_download[0])
+                    and not download_proc_ref
+                    and download_thread_ref[0] is None
+                    and not visual_auto_download_started_ref[0]
+                ):
+                    auto_download_pending_ref[0] = True
 
-            page.on("response", on_response)
+            # Context sees responses from all frames/tabs; page.on can miss iframe CDN (FST / doppiocdn m3u8).
+            context.on("response", on_response)
             page.goto(page_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
             timeline("page_loaded")
             log("cloudflare_wait_start")
@@ -1468,6 +1527,12 @@ def run_visual_mode(
                     log(f"server_tab_click_button: {try_tab}")
                     tab_clicked = False
                     if try_tab == "ST":
+                        dismiss_ad_overlays(page)
+                        page.wait_for_timeout(400)
+                        for _ in range(2):
+                            try_close_ad_overlay(page)
+                            page.wait_for_timeout(200)
+                    if str(try_tab).upper() == "FST":
                         dismiss_ad_overlays(page)
                         page.wait_for_timeout(400)
                         for _ in range(2):
@@ -1576,7 +1641,7 @@ def run_visual_mode(
                                 except Exception:
                                     pass
                     if tab_clicked:
-                        server_tab = try_tab
+                        server_tab = str(try_tab).upper()
                         timeline(f"server_tab_clicked_{server_tab}")
                         break
                     if try_tab == "ST" and not tab_clicked:
@@ -1601,6 +1666,77 @@ def run_visual_mode(
                         if tab_clicked:
                             server_tab = "ST"
                             timeline("server_tab_clicked_st")
+                            break
+                    if str(try_tab).upper() == "FST" and not tab_clicked:
+                        _label_esc = str(try_tab).replace("\\", "\\\\").replace("'", "\\'")
+                        _fst_no_ad_js = f"""() => {{
+                            var label = '{_label_esc}';
+                            var labelU = label.toUpperCase();
+                            function tabTxtNorm(s) {{
+                                return (s || '').replace(/\\s+/g, ' ').trim().toUpperCase();
+                            }}
+                            var btns = document.querySelectorAll('a.btn-server');
+                            for (var i = 0; i < btns.length; i++) {{
+                                var a = btns[i];
+                                if (tabTxtNorm(a.textContent || a.innerText) !== labelU) continue;
+                                a.scrollIntoView({{ block: 'center' }});
+                                a.click();
+                                return true;
+                            }}
+                            document.querySelectorAll('*').forEach(function(el) {{
+                                var t = (el.innerText || '').trim();
+                                var tu = t.toUpperCase();
+                                if (tu.indexOf('SERVER') >= 0 && tu.indexOf(labelU) >= 0 && t.length < 150) {{
+                                    var links = el.querySelectorAll('a.btn-server');
+                                    for (var j = 0; j < links.length; j++) {{
+                                        var a = links[j];
+                                        if (tabTxtNorm(a.textContent || a.innerText) !== labelU) continue;
+                                        a.scrollIntoView({{ block: 'center' }});
+                                        a.click();
+                                        return true;
+                                    }}
+                                }}
+                            }});
+                            return false;
+                        }}"""
+                        log("FST tab: retry without ad-href filter (href can look like ad)")
+                        for _fst_retry in range(6):
+                            dismiss_ad_overlays(page)
+                            try_close_ad_overlay(page)
+                            page.wait_for_timeout(400)
+                            tab_clicked = page.evaluate(_fst_no_ad_js)
+                            if not tab_clicked:
+                                for frame in page.frames:
+                                    if frame == page.main_frame:
+                                        continue
+                                    try:
+                                        if frame.evaluate(_fst_no_ad_js):
+                                            tab_clicked = True
+                                            break
+                                    except Exception:
+                                        pass
+                            if tab_clicked:
+                                break
+                            try:
+                                btn = page.locator("a.btn-server").filter(has_text=re.compile(r"^FST$", re.I)).first
+                                if btn.is_visible(timeout=2500):
+                                    btn.scroll_into_view_if_needed()
+                                    page.wait_for_timeout(200)
+                                    btn.click(force=True)
+                                    tab_clicked = True
+                                    break
+                            except Exception:
+                                pass
+                            try:
+                                page.get_by_role("link", name=re.compile(r"^FST$", re.I)).first.click(timeout=4000)
+                                tab_clicked = True
+                                break
+                            except Exception:
+                                pass
+                            page.wait_for_timeout(1200)
+                        if tab_clicked:
+                            server_tab = "FST"
+                            timeline("server_tab_clicked_fst")
                             break
                     page.wait_for_timeout(300)
                 if not tab_clicked:
@@ -1766,12 +1902,6 @@ def run_visual_mode(
             voe_failed_try_tv_ref = [False]    # after VOE timeout, try TV once
             tv_failed_try_fst_ref = [False]    # after TV timeout, try FST once
             fst_failed_try_st_ref = [False]    # after FST timeout, try ST once
-            download_proc_ref: list = []
-            stopped_by_user_ref: list = [False]
-            download_progress_text_ref: list = [None]
-            download_finished_ref: list = [None]
-            download_thread_ref: list = [None]
-            auto_download_pending_ref: list = [False]
             download_data_flowing = threading.Event()
 
             def progress_from_download_thread(text: str):
@@ -1782,6 +1912,9 @@ def run_visual_mode(
 
             def _switch_to_next_fallback(reason: str) -> None:
                 nonlocal server_tab
+                if user_picked_single_tab:
+                    log(f"{server_tab}: {reason} — staying on {requested_server_tab} (single-tab mode).")
+                    return
                 next_tab = None
                 if server_tab == "VOE" and not voe_failed_try_tv_ref[0]:
                     voe_failed_try_tv_ref[0] = True
@@ -1834,6 +1967,17 @@ def run_visual_mode(
                 try:
                     if download_progress_text_ref[0] is not None:
                         set_download_button_progress(download_progress_text_ref[0])
+                    if (
+                        auto_download
+                        and not visual_auto_download_started_ref[0]
+                        and not download_proc_ref
+                        and stream_url_for_download[0]
+                        and _is_downloadable_stream_url(stream_url_for_download[0])
+                        and server_tab in ("ST", "TV", "FST", "VOE")
+                    ):
+                        if not auto_download_pending_ref[0]:
+                            log("Auto-download: stream URL ready (main loop poll).")
+                        auto_download_pending_ref[0] = True
                     if download_finished_ref[0] is not None:
                         set_download_button_state(download_finished_ref[0])
                         log(f"Download state: {download_finished_ref[0]}.")
@@ -1851,12 +1995,13 @@ def run_visual_mode(
                         set_download_button_state("stopped")
                         log("Download stopped (saved).")
                     if auto_download_pending_ref[0]:
-                        auto_download_pending_ref[0] = False
                         download_url = stream_url_for_download[0]
                         if download_url and not _is_downloadable_stream_url(download_url):
                             log(f"Waiting for direct stream URL (have embed only: {download_url[:80]}...)")
                             download_url = None
                         if download_url:
+                            auto_download_pending_ref[0] = False
+                            visual_auto_download_started_ref[0] = True
                             log("Auto-download: target link appeared, starting.")
                             _log_stream_url(download_url, "download_click")
                             try:
@@ -1903,10 +2048,31 @@ def run_visual_mode(
                             download_thread_ref[0] = t
                             t.start()
                             log("Waiting for download to start before closing browser...")
-                            data_ok = download_data_flowing.wait(timeout=20)
+                            _dl_first_byte_timeout = 40 if server_tab == "FST" else 20
+                            data_ok = download_data_flowing.wait(timeout=_dl_first_byte_timeout)
                             dl_failed = download_finished_ref[0] == "failed"
                             # If download failed or timed out without data, try next fallback tab.
                             if (dl_failed or not data_ok) and server_tab in ("TV", "VOE", "FST"):
+                                if user_picked_single_tab:
+                                    log(
+                                        f"{server_tab}: download {'failed' if dl_failed else 'timed out waiting for data'}; "
+                                        f"single-tab mode — not switching server tab."
+                                    )
+                                    if download_proc_ref:
+                                        try:
+                                            download_proc_ref[0].kill()
+                                            download_proc_ref[0].wait(timeout=5)
+                                        except Exception:
+                                            pass
+                                        download_proc_ref.clear()
+                                    download_finished_ref[0] = None
+                                    download_data_flowing.clear()
+                                    auto_download_pending_ref[0] = False
+                                    stream_url_for_download[0] = None
+                                    stream_referer_for_download[0] = None
+                                    target_stream_seen_ref[0] = False
+                                    explicit_low_quality_seen_ref[0] = False
+                                    continue
                                 fallback_tab = "FST" if server_tab == "TV" else "ST"
                                 log(
                                     f"Download {'failed' if dl_failed else 'timed out'} on {server_tab}, "
@@ -1964,8 +2130,8 @@ def run_visual_mode(
                                 pass
                             break
                         else:
-                            set_download_button_state("no_url")
-                            _visual_log("No stream URL (auto).")
+                            # Pending stays True until a direct m3u8/mp4/get_video URL is available (embed-only phase).
+                            pass
                     current_url = page.url
                     if any(dom in current_url for dom in BLOCKED_REDIRECT_DOMAINS):
                         _visual_log("blocked_ad_navigation going_back")
@@ -2024,6 +2190,7 @@ def run_visual_mode(
                             log(f"Waiting for direct stream URL (have embed only: {download_url[:80]}...)")
                             set_download_button_state("idle")
                         elif download_url:
+                            visual_auto_download_started_ref[0] = True
                             _log_stream_url(download_url, "download_click")
                             try:
                                 LAST_DOWNLOAD_URL_FILE.write_text(download_url, encoding="utf-8")
@@ -2068,7 +2235,8 @@ def run_visual_mode(
                             download_thread_ref[0] = t
                             t.start()
                             log("Waiting for download to start before closing browser...")
-                            if download_data_flowing.wait(timeout=20) or download_finished_ref[0]:
+                            _dl_wait_manual = 40 if server_tab == "FST" else 20
+                            if download_data_flowing.wait(timeout=_dl_wait_manual) or download_finished_ref[0]:
                                 if download_finished_ref[0] == "failed":
                                     log("Download failed before data started flowing.")
                                 else:
@@ -2095,7 +2263,12 @@ def run_visual_mode(
                                 on_player_page = True
                         except Exception:
                             pass
-                    if on_player_page and explicit_low_quality_seen_ref[0] and not stream_url_for_download[0]:
+                    if (
+                        on_player_page
+                        and explicit_low_quality_seen_ref[0]
+                        and not stream_url_for_download[0]
+                        and not user_picked_single_tab
+                    ):
                         _switch_to_next_fallback("only explicit <720 stream variants seen")
                     # Streamtape: if we have embed but no get_video yet, click play inside iframe to trigger it
                     if on_player_page and stream_url_for_download[0] and not _is_downloadable_stream_url(stream_url_for_download[0]):
@@ -2351,10 +2524,18 @@ def run_visual_mode(
                                     log("VOE: no stream detected within 60 seconds; stopping with error.")
                                     stop_event.set()
                         elif server_tab != "VOE" and not tv_click_loop_done_ref[0] and auto_click_iters[0] >= 5:
-                            # TV/ST keep ~60s timeout; FST is shorter (~30s) to fall back sooner.
+                            # TV/ST: ~60s. FST in default chain: shorter to fall back to ST sooner.
+                            # FST with -s FST: long waits — master m3u8 / CDN can be slow after 240p segments.
                             tv_click_loop_done_ref[0] = True
-                            tab_attempts = 2 if server_tab == "FST" else 4
-                            tab_timeout_s = 30 if server_tab == "FST" else 60
+                            if server_tab == "FST" and user_picked_single_tab:
+                                tab_attempts = 4
+                                tab_timeout_s = 40
+                            elif server_tab == "FST":
+                                tab_attempts = 3
+                                tab_timeout_s = 40
+                            else:
+                                tab_attempts = 4
+                                tab_timeout_s = 60
                             _visual_log(f"auto_click_player: {server_tab} — scroll + click pattern until stream (timeout ~{tab_timeout_s}s)")
                             for attempt in range(tab_attempts):  # ~15s per attempt
                                 if target_stream_seen_ref[0] or stream_url_for_download[0]:
@@ -2415,8 +2596,14 @@ def run_visual_mode(
                                         auto_download_pending_ref[0] = True
                                     break
                                 if explicit_low_quality_seen_ref[0] and not stream_url_for_download[0]:
-                                    _visual_log(f"auto_click_player: {server_tab} — only explicit <720 seen; switching to next fallback")
-                                    break
+                                    if user_picked_single_tab:
+                                        _visual_log(
+                                            f"auto_click_player: {server_tab} — explicit <720 seen; "
+                                            f"keeping tab (single-tab mode), waiting for usable stream"
+                                        )
+                                    else:
+                                        _visual_log(f"auto_click_player: {server_tab} — only explicit <720 seen; switching to next fallback")
+                                        break
                                 if not target_stream_seen_ref[0]:
                                     if try_click_player(page):
                                         _visual_log("auto_click_player: extra click (stream not found)")
@@ -3134,7 +3321,10 @@ def main() -> int:
         return 1
 
     if args.download:
-        download_url = get_downloadable_url(urls, prefer_voe_player=True, video_code=video_code)
+        # VOE default: prefer supremejav/turbovidhls so we do not grab a random doppiocdn playlist.
+        # FST/ST/TV: streams are on CDN (e.g. doppiocdn m3u8) — allow those URLs.
+        prefer_voe = str(args.server_tab).upper() == "VOE"
+        download_url = get_downloadable_url(urls, prefer_voe_player=prefer_voe, video_code=video_code)
         if not download_url:
             print("No downloadable URL (only blob: found). Cannot download.", file=sys.stderr)
             return 1

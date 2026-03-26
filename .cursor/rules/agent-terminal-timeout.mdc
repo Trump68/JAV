@@ -1,0 +1,10 @@
+---
+description: Shell command wait limit for tests (e.g. dodnld visual mode)
+alwaysApply: true
+---
+
+# Terminal: длительные команды
+
+При запуске команд в терминале этой среды (в т.ч. `python dodnld.py ... -v`), у вызова Shell указывай **`block_until_ms: 60000`** (60 секунд), чтобы одна команда не обрывалась раньше из‑за короткого лимита ожидания агента.
+
+Для прогонов дольше 60 с при необходимости увеличивай `block_until_ms` пропорционально задаче.
