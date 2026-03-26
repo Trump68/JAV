@@ -1083,7 +1083,7 @@ def run_visual_mode(
 ) -> bool:
     """Open page in visible browser; click server_tab (VOE, ST, etc.) then dismiss ads. Returns True if download succeeded (done/stopped), False otherwise."""
     requested_server_tab = str(server_tab).upper()
-    # Default VOE tries VOE→TV→FST→ST. With -s FST / -s ST / -s TV stay on that tab (no auto-fallback).
+    # Default VOE tries FST→VOE→TV→ST. With -s FST / -s ST / -s TV stay on that tab (no auto-fallback).
     user_picked_single_tab = requested_server_tab != "VOE"
     try:
         from datetime import datetime
@@ -1123,48 +1123,16 @@ def run_visual_mode(
             context.add_init_script(STEALTH_INIT_SCRIPT)
             DOWNLOAD_BUTTON_SCRIPT = """
                 (function() {
-                    if (window.__downloadBtnAttached) return;
-                    window.__downloadBtnAttached = true;
-                    window.__userStopDownload = false;
-                    window.__downloadInProgress = false;
-                    function setStreamFlag() {
-                        var t = window.top || window;
-                        t.__userSawStream = true;
-                        t.__userSawStreamTime = typeof Date !== 'undefined' ? Date.now() : 0;
-                    }
-                    if (window === window.top) {
-                        function addButton() {
-                            if (document.getElementById('jav-download-trigger')) return;
-                            var btn = document.createElement('button');
-                            btn.id = 'jav-download-trigger';
-                            btn.textContent = 'Download';
-                            btn.style.cssText = 'position:fixed !important; top:0 !important; left:0 !important; right:0 !important; width:100% !important; z-index:2147483647 !important; padding:14px 20px !important; background:#e65100 !important; color:#fff !important; border:none !important; border-radius:0 !important; cursor:pointer !important; font-size:16px !important; font-weight:bold !important; box-shadow:0 4px 12px rgba(0,0,0,0.5) !important; box-sizing:border-box !important;';
-                            btn.onclick = function() { var t = window.top || window; if (t.__downloadInProgress) { t.__userStopDownload = true; } else { setStreamFlag(); } };
-                            (document.body || document.documentElement).appendChild(btn);
-                        }
-                        if (document.body) { addButton(); } else { document.addEventListener('DOMContentLoaded', addButton); }
-                        setTimeout(addButton, 500);
-                    }
+                    // Download button disabled by user request
                 })();
             """
-            context.add_init_script(DOWNLOAD_BUTTON_SCRIPT)
+            # context.add_init_script(DOWNLOAD_BUTTON_SCRIPT)
+
 
             def add_download_button_to_main_frame():
-                try:
-                    page.evaluate("""
-                        (function() {
-                            if (window !== window.top) return;
-                            if (document.getElementById('jav-download-trigger')) return;
-                            var btn = document.createElement('button');
-                            btn.id = 'jav-download-trigger';
-                            btn.textContent = 'Download';
-                            btn.style.cssText = 'position:fixed !important; top:0 !important; left:0 !important; right:0 !important; width:100% !important; z-index:2147483647 !important; padding:14px 20px !important; background:#e65100 !important; color:#fff !important; border:none !important; border-radius:0 !important; cursor:pointer !important; font-size:16px !important; font-weight:bold !important; box-shadow:0 4px 12px rgba(0,0,0,0.5) !important; box-sizing:border-box !important;';
-                            btn.onclick = function() { var t = window.top || window; if (t.__downloadInProgress) { t.__userStopDownload = true; } else { t.__userSawStream = true; t.__userSawStreamTime = Date.now ? Date.now() : 0; } };
-                            (document.body || document.documentElement).appendChild(btn);
-                        })();
-                    """)
-                except Exception:
-                    pass
+                # Download button disabled by user request
+                pass
+
 
             def set_download_button_state(state: str):
                 """state: 'idle' | 'downloading' | 'done' | 'failed' | 'no_url'"""
@@ -1503,14 +1471,14 @@ def run_visual_mode(
             }""")
             timeline("remove_target_blank_done")
             page.wait_for_timeout(500)
-            tabs_to_try = ["VOE", "TV", "FST", "ST"] if server_tab == "VOE" else [server_tab]
+            tabs_to_try = ["FST", "VOE", "TV", "ST"] if server_tab == "VOE" else [server_tab]
             if skip_st:
                 tabs_to_try = [t for t in tabs_to_try if t != "ST"]
                 if server_tab == "ST":
                     log("skip_st is enabled and server_tab=ST was requested; stopping.")
                     return False
             log(f"server_tab_click_start (try: {tabs_to_try}) — only a.btn-server or SERVER block (avoid ad links)")
-            log("server_tab_click_order: VOE-TV-FST-ST")
+            log("server_tab_click_order: FST-VOE-TV-ST")
             tab_clicked = False
             try:
                 try:
@@ -3287,7 +3255,7 @@ def main() -> int:
         "-s",
         default="VOE",
         metavar="TAB",
-        help="Server tab: VOE (default: try VOE then TV then FST then ST), or ST, TV, FST",
+        help="Server tab: VOE (default: try FST then VOE then TV then ST), or ST, TV, FST",
     )
     parser.add_argument(
         "--skip-st",
