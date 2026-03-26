@@ -1332,8 +1332,6 @@ def run_visual_mode(
                     _set_stream_url(url, response)
                     if auto_download and _is_downloadable_stream_url(url):
                         auto_download_pending_ref[0] = True
-                print(f"[STREAM] {url[:120]}{'...' if len(url) > 120 else ''}")
-                sys.stdout.flush()
 
             page.on("response", on_response)
             page.goto(page_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
@@ -1348,8 +1346,9 @@ def run_visual_mode(
             }""")
             timeline("remove_target_blank_done")
             page.wait_for_timeout(500)
-            tabs_to_try = ["VOE", "TV", "ST"] if server_tab == "VOE" else [server_tab]
+            tabs_to_try = ["VOE", "TV", "FST", "ST"] if server_tab == "VOE" else [server_tab]
             log(f"server_tab_click_start (try: {tabs_to_try}) — only a.btn-server or SERVER block (avoid ad links)")
+            log("server_tab_click_order: VOE-TV-FST-ST")
             tab_clicked = False
             try:
                 try:
@@ -1363,6 +1362,7 @@ def run_visual_mode(
                     page.wait_for_timeout(200)
                 page.wait_for_timeout(500)
                 for try_tab in tabs_to_try:
+                    log(f"server_tab_click_button: {try_tab}")
                     tab_clicked = False
                     if try_tab == "ST":
                         dismiss_ad_overlays(page)
@@ -1418,6 +1418,7 @@ def run_visual_mode(
                             except Exception:
                                 pass
                     if tab_clicked:
+                        log(f"server_tab_click_success: {try_tab}")
                         page.wait_for_timeout(400)
                     # Only if safe click failed: try Playwright locator (may hit ad if multiple VOE links)
                     if not tab_clicked:
@@ -1637,7 +1638,13 @@ def run_visual_mode(
             stop_event = threading.Event()
 
             def wait_enter():
-                input()
+                # In some environments stdin can be closed (no tty), which raises EOFError.
+                # Do not set stop_event on EOF — otherwise visual mode exits immediately and
+                # auto-download never runs when launched from a non-interactive parent.
+                try:
+                    input()
+                except EOFError:
+                    return
                 stop_event.set()
 
             threading.Thread(target=wait_enter, daemon=True).start()
@@ -1647,7 +1654,8 @@ def run_visual_mode(
             voe_click_loop_done_ref = [False]  # VOE: run "click until stream" loop only once
             tv_click_loop_done_ref = [False]   # TV/ST: run "click until stream" loop only once (~60s timeout)
             voe_failed_try_tv_ref = [False]    # after VOE timeout, try TV once
-            tv_failed_try_st_ref = [False]     # after TV timeout, try ST once
+            tv_failed_try_fst_ref = [False]    # after TV timeout, try FST once
+            fst_failed_try_st_ref = [False]    # after FST timeout, try ST once
             download_proc_ref: list = []
             stopped_by_user_ref: list = [False]
             download_progress_text_ref: list = [None]
@@ -1741,9 +1749,13 @@ def run_visual_mode(
                             log("Waiting for download to start before closing browser...")
                             data_ok = download_data_flowing.wait(timeout=20)
                             dl_failed = download_finished_ref[0] == "failed"
-                            # If download failed or timed out without data, try ST as fallback
-                            if (dl_failed or not data_ok) and server_tab in ("TV", "VOE"):
-                                log(f"Download {'failed' if dl_failed else 'timed out'} on {server_tab}, switching to ST...")
+                            # If download failed or timed out without data, try next fallback tab.
+                            if (dl_failed or not data_ok) and server_tab in ("TV", "VOE", "FST"):
+                                fallback_tab = "FST" if server_tab == "TV" else "ST"
+                                log(
+                                    f"Download {'failed' if dl_failed else 'timed out'} on {server_tab}, "
+                                    f"switching to {fallback_tab}..."
+                                )
                                 # Kill stuck download process
                                 if download_proc_ref:
                                     try:
@@ -1758,22 +1770,23 @@ def run_visual_mode(
                                 stream_referer_for_download[0] = None
                                 target_stream_seen_ref[0] = False
                                 auto_download_pending_ref[0] = False
-                                server_tab = "ST"
+                                server_tab = fallback_tab
                                 dismiss_ad_overlays(page)
                                 page.wait_for_timeout(500)
-                                _st_js = """() => {
+                                _fallback_js = """() => {
+                                    var want = '__TAB__';
                                     var btns = document.querySelectorAll('a.btn-server');
                                     for (var i = 0; i < btns.length; i++) {
-                                        if ((btns[i].textContent || '').trim() === 'ST') {
+                                        if ((btns[i].textContent || '').trim().toUpperCase() === want) {
                                             btns[i].scrollIntoView({block:'center'});
                                             btns[i].click();
                                             return true;
                                         }
                                     }
                                     return false;
-                                }"""
+                                }""".replace("__TAB__", fallback_tab)
                                 try:
-                                    page.evaluate(_st_js)
+                                    page.evaluate(_fallback_js)
                                 except Exception:
                                     pass
                                 page.wait_for_timeout(5000)
@@ -2123,8 +2136,32 @@ def run_visual_mode(
                                             server_tab = "TV"
                                             auto_click_iters[0] = 5
                                         else:
-                                            log("TV tab not found; stopping with error.")
-                                            stop_event.set()
+                                            log("TV tab not found; trying ST fallback...")
+                                            # Try ST once before giving up.
+                                            try:
+                                                clicked_st = page.evaluate("""() => {
+                                                    var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                                                    var btns = document.querySelectorAll('a.btn-server');
+                                                    for (var i = 0; i < btns.length; i++) {
+                                                        var a = btns[i];
+                                                        if ((a.textContent || a.innerText || '').trim().toUpperCase() !== 'ST') continue;
+                                                        if (adLike.test((a.getAttribute('href') || '').trim())) continue;
+                                                        a.scrollIntoView({ block: 'center' });
+                                                        a.click();
+                                                        return true;
+                                                    }
+                                                    return false;
+                                                }""")
+                                                if clicked_st:
+                                                    page.wait_for_timeout(3000)
+                                                    server_tab = "ST"
+                                                    auto_click_iters[0] = 5
+                                                else:
+                                                    log("ST tab not found; stopping with error.")
+                                                    stop_event.set()
+                                            except Exception as e:
+                                                log(f"Failed ST fallback after TV not found: {e!r}; stopping.")
+                                                stop_event.set()
                                     except Exception as e:
                                         log(f"Failed to switch to TV: {e!r}; stopping.")
                                         stop_event.set()
@@ -2163,7 +2200,7 @@ def run_visual_mode(
                                     timeline("auto_click_player")
                                     _visual_log(f"auto_click_player: {server_tab} attempt {attempt + 1} click 1")
                                 page.wait_for_timeout(500)
-                                if server_tab in ("TV", "ST"):
+                                if server_tab in ("TV", "FST", "ST"):
                                     page.wait_for_timeout(10_000)
                                     current_url = page.url
                                     if any(dom in current_url for dom in BLOCKED_REDIRECT_DOMAINS) or not any(dom in current_url for dom in ALLOWED_MAIN_DOMAINS):
@@ -2213,10 +2250,41 @@ def run_visual_mode(
                                     except Exception:
                                         pass
                             if not target_stream_seen_ref[0] and not stream_url_for_download[0]:
-                                if server_tab == "TV" and not tv_failed_try_st_ref[0]:
-                                    tv_failed_try_st_ref[0] = True
-                                    _visual_log("auto_click_player: TV — timeout 60s, no stream; trying ST...")
-                                    log("TV: no stream within 60s, switching to ST...")
+                                if server_tab == "TV" and not tv_failed_try_fst_ref[0]:
+                                    tv_failed_try_fst_ref[0] = True
+                                    _visual_log("auto_click_player: TV — timeout 60s, no stream; trying FST...")
+                                    log("TV: no stream within 60s, switching to FST...")
+                                    dismiss_ad_overlays(page)
+                                    page.wait_for_timeout(500)
+                                    try:
+                                        clicked_fst = page.evaluate("""() => {
+                                            var adLike = /ads?\\b|popads|popcash|exoclick|propeller|goldensacam|purplesacam|aj2532\\.bid|altaffiliatesol|adclickad|t\\.me|adsterra|clickadu|hilltopads|onclkds|adsrvr/i;
+                                            var btns = document.querySelectorAll('a.btn-server');
+                                            for (var i = 0; i < btns.length; i++) {
+                                                var a = btns[i];
+                                                if ((a.textContent || a.innerText || '').trim().toUpperCase() !== 'FST') continue;
+                                                if (adLike.test((a.getAttribute('href') || '').trim())) continue;
+                                                a.scrollIntoView({ block: 'center' });
+                                                a.click();
+                                                return true;
+                                            }
+                                            return false;
+                                        }""")
+                                        if clicked_fst:
+                                            page.wait_for_timeout(3000)
+                                            server_tab = "FST"
+                                            tv_click_loop_done_ref[0] = False
+                                            auto_click_iters[0] = 5
+                                        else:
+                                            log("FST tab not found; stopping with error.")
+                                            stop_event.set()
+                                    except Exception as e:
+                                        log(f"Failed to switch to FST: {e!r}; stopping.")
+                                        stop_event.set()
+                                elif server_tab == "FST" and not fst_failed_try_st_ref[0]:
+                                    fst_failed_try_st_ref[0] = True
+                                    _visual_log("auto_click_player: FST — timeout 60s, no stream; trying ST...")
+                                    log("FST: no stream within 60s, switching to ST...")
                                     dismiss_ad_overlays(page)
                                     page.wait_for_timeout(500)
                                     try:
@@ -2558,6 +2626,13 @@ def _download_direct_http(
         return False
 
 
+def _yt_dlp_suppress_log_line(line: str) -> bool:
+    """True if this yt-dlp log line should not be printed (noisy extractor chatter)."""
+    if not line:
+        return False
+    return bool(re.match(r"\s*\[generic\]", line, re.I))
+
+
 def download_video(
     url: str,
     output_path: str | Path,
@@ -2670,6 +2745,8 @@ def download_video(
 
             def read_stderr():
                 for line in proc.stderr:
+                    if _yt_dlp_suppress_log_line(line):
+                        continue
                     print(line, end="", file=sys.stderr)
 
             stderr_thread = threading.Thread(target=read_stderr, daemon=True)
@@ -2710,6 +2787,8 @@ def download_video(
                     continue
 
                 # Non-progress yt-dlp output: print normally.
+                if _yt_dlp_suppress_log_line(line):
+                    continue
                 print(line, end="", file=sys.stderr)
             # Ensure the progress bar line ends with newline.
             if last_line_len:
@@ -2728,13 +2807,45 @@ def download_video(
                 print(f"Download failed (exit {proc.returncode})", file=sys.stderr)
                 return False
             return True
-        result = subprocess.run(
+        # Same as above but without progress parsing (still filter noisy [generic] lines).
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        proc2 = subprocess.Popen(
             cmd,
-            check=True,
-            capture_output=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=600,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+            env=env,
         )
+
+        def read_stderr2():
+            assert proc2.stderr is not None
+            for line in proc2.stderr:
+                if _yt_dlp_suppress_log_line(line):
+                    continue
+                print(line, end="", file=sys.stderr)
+
+        t2 = threading.Thread(target=read_stderr2, daemon=True)
+        t2.start()
+        assert proc2.stdout is not None
+        for line in proc2.stdout:
+            if _yt_dlp_suppress_log_line(line):
+                continue
+            print(line, end="", file=sys.stderr)
+        t2.join(timeout=0.5)
+        try:
+            proc2.wait(timeout=600)
+        except subprocess.TimeoutExpired:
+            proc2.kill()
+            proc2.wait()
+            print("Download failed (timeout)", file=sys.stderr)
+            return False
+        if proc2.returncode != 0:
+            print(f"Download failed (exit {proc2.returncode})", file=sys.stderr)
+            return False
         return True
     except subprocess.CalledProcessError as e:
         print(f"Download failed (exit {e.returncode}): {e.stderr or e.stdout or str(e)}", file=sys.stderr)
@@ -2783,7 +2894,7 @@ def main() -> int:
         "-s",
         default="VOE",
         metavar="TAB",
-        help="Server tab: VOE (default: try VOE then TV then ST), or ST, TV, FST",
+        help="Server tab: VOE (default: try VOE then TV then FST then ST), or ST, TV, FST",
     )
     args = parser.parse_args()
 

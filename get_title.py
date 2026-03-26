@@ -88,6 +88,15 @@ def _save_download(conn: sqlite3.Connection, slug: str, type_str: str, upload_da
     )
     conn.commit()
 
+
+def _remove_dir_if_empty(path: Path) -> None:
+    """Remove directory if it exists and has no files/subdirectories."""
+    try:
+        if path.exists() and path.is_dir() and not any(path.iterdir()):
+            path.rmdir()
+    except Exception:
+        pass
+
 from playwright.sync_api import sync_playwright
 
 # Reuse browser setup from main script
@@ -439,15 +448,6 @@ def main() -> int:
             proc = subprocess.run(dodnld_cmd, cwd=str(script_dir))
             if proc.returncode == 0:
                 folder_dir = DOWNLOAD_DIR / cast_slug / folder_name
-                video_path = folder_dir / filename
-                if not _video_file_valid(video_path):
-                    print(f"[PROCESS] {idx}: invalid/corrupt video (ffprobe), removing {folder_dir}", file=sys.stderr)
-                    if folder_dir.exists():
-                        try:
-                            shutil.rmtree(folder_dir)
-                        except Exception as rm_err:
-                            print(f"[PROCESS] Could not remove {folder_dir}: {rm_err!r}", file=sys.stderr)
-                    continue
                 # Save DB record
                 _save_download(conn, code, type_str, date, url, labels)
                 # Save POSTER.jpg into the same folder (inside actress folder)
@@ -469,6 +469,7 @@ def main() -> int:
                 if video_path.exists():
                     size_mb = video_path.stat().st_size / (1024 * 1024)
                     print(f"[PROCESS] Partial file kept: {video_path} ({size_mb:.1f} MB)", file=sys.stderr)
+                _remove_dir_if_empty(folder_dir)
         conn.close()
         print(f"[PROCESS] Completed. Started {total} downloads, skipped {skipped} (already in DB). List: {list_path}", file=sys.stderr)
         return 0

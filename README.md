@@ -138,6 +138,35 @@ python get_title.py --process-list kijima-airi --redownload
 python get_title.py --process-list kijima-airi --censored --redownload
 ```
 
+---
+
+### cut_video.py — вырезка куска по времени
+
+Режет входной видеофайл и сохраняет фрагмент между `--start` и `--end`.
+
+Требуется `ffmpeg` (обычно достаточно установить один раз).
+
+Параметры:
+
+- `--input/-i` — входной файл
+- `--output/-o` — выходной файл
+- `--start` — время начала (например `00:02:10` или `130.5`)
+- `--end` — время конца (например `00:05:30` или `330`)
+- `--mode`:
+  - `reencode` (по умолчанию) — более точная нарезка (перекодирование)
+  - `copy` — без перекодирования (быстрее, но рез может “съехать” на keyframe)
+- `--ffmpeg-path` — если `ffmpeg.exe` не в `PATH`, укажите полный путь
+
+Примеры:
+
+```bash
+python cut_video.py --input "in.m4v" --output "out.mp4" --start "00:02:10" --end "00:05:30" --mode reencode
+```
+
+```bash
+
+```
+
 ## How it works (dodnld.py)
 
 - Opens the given URL in headless (or visible with `--visual`) Chromium/Chrome.
