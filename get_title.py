@@ -374,6 +374,13 @@ def main() -> int:
         action="store_true",
         help="Pass through to dodnld.py: skip any ST fallback attempts.",
     )
+    parser.add_argument(
+        "--server-tab",
+        "-s",
+        default=None,
+        metavar="TABS",
+        help="Server tab priority (comma-separated): FST,VOE,TV,ST or single tab FST/VOE/TV/ST. Pass through to dodnld.py.",
+    )
     args = parser.parse_args()
     use_visual = args.visual and not getattr(args, "no_visual", False)
 
@@ -452,6 +459,8 @@ def main() -> int:
                 dodnld_cmd.insert(-2, "--visual")
             if getattr(args, "skip_st", False):
                 dodnld_cmd.insert(-2, "--skip-st")
+            if getattr(args, "server_tab", None):
+                dodnld_cmd.extend(["-s", args.server_tab])
             proc = subprocess.run(dodnld_cmd, cwd=str(script_dir))
             if proc.returncode == 0:
                 folder_dir = DOWNLOAD_DIR / cast_slug / folder_name
@@ -470,12 +479,26 @@ def main() -> int:
                     print(f"[PROCESS] Could not save poster for {url}: {poster_err!r}", file=sys.stderr)
             else:
                 print(f"[PROCESS] Failed (exit {proc.returncode}) for {url}", file=sys.stderr)
-                # Do not remove partial download — user can retry or resume manually
+                # If video file exists but POSTER.jpg is missing, rename folder with corrupted_ prefix
                 folder_dir = DOWNLOAD_DIR / cast_slug / folder_name
                 video_path = folder_dir / filename
-                if video_path.exists():
-                    size_mb = video_path.stat().st_size / (1024 * 1024)
-                    print(f"[PROCESS] Partial file kept: {video_path} ({size_mb:.1f} MB)", file=sys.stderr)
+                poster_path = folder_dir / "POSTER.jpg"
+                if video_path.exists() and not poster_path.exists():
+                    corrupted_folder_name = f"corrupted_{folder_name}"
+                    corrupted_dir = DOWNLOAD_DIR / cast_slug / corrupted_folder_name
+                    try:
+                        folder_dir.rename(corrupted_dir)
+                        size_mb = corrupted_dir.joinpath(filename).stat().st_size / (1024 * 1024) if corrupted_dir.joinpath(filename).exists() else 0
+                        print(f"[PROCESS] Renamed to corrupted: {corrupted_folder_name} ({size_mb:.1f} MB)", file=sys.stderr)
+                    except Exception as rename_err:
+                        print(f"[PROCESS] Could not rename folder: {rename_err!r}", file=sys.stderr)
+                        if video_path.exists():
+                            size_mb = video_path.stat().st_size / (1024 * 1024)
+                            print(f"[PROCESS] Partial file kept: {video_path} ({size_mb:.1f} MB)", file=sys.stderr)
+                else:
+                    if video_path.exists():
+                        size_mb = video_path.stat().st_size / (1024 * 1024)
+                        print(f"[PROCESS] Partial file kept: {video_path} ({size_mb:.1f} MB)", file=sys.stderr)
                 _remove_dir_if_empty(folder_dir)
         conn.close()
         print(f"[PROCESS] Completed. Started {total} downloads, skipped {skipped} (already in DB). List: {list_path}", file=sys.stderr)
@@ -511,6 +534,8 @@ def main() -> int:
         dodnld_cmd.insert(-2, "--visual")
     if getattr(args, "skip_st", False):
         dodnld_cmd.insert(-2, "--skip-st")
+    if getattr(args, "server_tab", None):
+        dodnld_cmd.extend(["-s", args.server_tab])
     code_dir = DOWNLOAD_DIR / code
     code_dir.mkdir(parents=True, exist_ok=True)
     out_file = code_dir / f"{code}.txt"
@@ -540,6 +565,20 @@ def main() -> int:
             print(f"Saved cover: {cover_path}", file=sys.stderr)
         else:
             print(f"Could not download cover: {cover_url}", file=sys.stderr)
+    
+    # If download failed but video file exists without POSTER.jpg, rename with corrupted_ prefix
+    if proc.returncode != 0:
+        if video_path.exists() and not cover_path.exists():
+            corrupted_code_dir = DOWNLOAD_DIR / f"corrupted_{code}"
+            try:
+                code_dir.rename(corrupted_code_dir)
+                print(f"Renamed to corrupted: {corrupted_code_dir.name}", file=sys.stderr)
+            except Exception as rename_err:
+                print(f"Could not rename folder: {rename_err!r}", file=sys.stderr)
+                if video_path.exists():
+                    size_mb = video_path.stat().st_size / (1024 * 1024)
+                    print(f"Partial file kept: {video_path} ({size_mb:.1f} MB)", file=sys.stderr)
+    
     return 0 if proc.returncode == 0 else 1
 
 

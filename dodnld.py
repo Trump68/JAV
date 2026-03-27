@@ -1083,8 +1083,21 @@ def run_visual_mode(
 ) -> bool:
     """Open page in visible browser; click server_tab (VOE, ST, etc.) then dismiss ads. Returns True if download succeeded (done/stopped), False otherwise."""
     requested_server_tab = str(server_tab).upper()
-    # Default VOE tries FST→VOE→TV→ST. With -s FST / -s ST / -s TV stay on that tab (no auto-fallback).
-    user_picked_single_tab = requested_server_tab != "VOE"
+    
+    # Parse server_tab: can be single tab (VOE) or comma-separated list (FST,VOE,TV,ST)
+    if "," in requested_server_tab:
+        tab_list = [t.strip().upper() for t in requested_server_tab.split(",")]
+        user_picked_single_tab = False
+    else:
+        # Single tab or default VOE
+        if requested_server_tab == "VOE":
+            # Default order: FST→VOE→TV→ST
+            tab_list = ["FST", "VOE", "TV", "ST"]
+            user_picked_single_tab = False
+        else:
+            # Single tab specified: stay on it
+            tab_list = [requested_server_tab]
+            user_picked_single_tab = True
     try:
         from datetime import datetime
 
@@ -1471,14 +1484,14 @@ def run_visual_mode(
             }""")
             timeline("remove_target_blank_done")
             page.wait_for_timeout(500)
-            tabs_to_try = ["FST", "VOE", "TV", "ST"] if server_tab == "VOE" else [server_tab]
+            tabs_to_try = tab_list
             if skip_st:
                 tabs_to_try = [t for t in tabs_to_try if t != "ST"]
-                if server_tab == "ST":
+                if "ST" in tab_list and len(tab_list) == 1:
                     log("skip_st is enabled and server_tab=ST was requested; stopping.")
                     return False
             log(f"server_tab_click_start (try: {tabs_to_try}) — only a.btn-server or SERVER block (avoid ad links)")
-            log("server_tab_click_order: FST-VOE-TV-ST")
+            log(f"server_tab_click_order: {'-'.join(tabs_to_try)}")
             tab_clicked = False
             try:
                 try:
@@ -3255,7 +3268,7 @@ def main() -> int:
         "-s",
         default="VOE",
         metavar="TAB",
-        help="Server tab: VOE (default: try FST then VOE then TV then ST), or ST, TV, FST",
+        help="Server tab priority (comma-separated): FST,VOE,TV,ST (default: FST,VOE,TV,ST), or single tab VOE/ST/TV/FST to stay on that tab",
     )
     parser.add_argument(
         "--skip-st",
