@@ -160,12 +160,15 @@ python get_title.py --process-list kijima-airi --censored --redownload
 Примеры:
 
 ```bash
-python cut_video.py --input "in.m4v" --output "out.mp4" --start "00:02:10" --end "00:05:30" --mode reencode
+python c:/projects/JAV/cut_video.py --input "NSFS-061_UNCENSORED.m4v" --output "out.m4v" --start "00:00:00" --end "02:02:30" --mode copy
 ```
 
 ```bash
 
 ```
+
+
+
 
 ## How it works (dodnld.py)
 
