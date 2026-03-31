@@ -102,40 +102,66 @@ python dodnld.py "https://supjav.com/411204.html" -v --server-tab FST
 | `--redownload` | | С `--process-list`: скачивать даже если фильм уже в БД |
 | `--censored` | | С `--process-list`: обрабатывать записи с пустыми labels (censored) |
 
-**Одна страница — получить title/code/cast, скачать, сохранить постер:**
+**Режим одной видео-страницы:** `url` — страница ролика; скрипт берёт title/code/cast, постер и вызывает `dodnld.py`.
 
-```bash
-python get_title.py "https://supjav.com/411204.html"
-```
+**Режим `--cast-list`:** `url` — страница актрисы (`https://supjav.com/category/cast/{SLUG}`). Обход пагинации; результат **`download/{SLUG}/LIST.TXT`** (последний сегмент пути = `SLUG`).
 
-**Собрать список фильмов актрисы (обход всех страниц каста):**
+**Режим `--process-list SLUG`:** читает **`download/{SLUG}/LIST.TXT`**. Без `--censored` обрабатываются строки, где в labels есть **Reducing Mosaic** (папка `CODE UNC [дата]/`, файл `CODE_UNCENSORED.m4v`) или **Uncensored Leak** (папка `CODE LKD [дата]/`, файл `CODE_LEAKED.m4v`, например `WANZ-377 LKD [2023.06.24]` / `WANZ-377_LEAKED.m4v`). С `--censored` — строки с пустым label (`… C [дата]/`, `CODE.m4v`). Уже скачанное — в SQLite **`downloads.db`**; `--redownload` заставляет качать снова. `--no-visual` — вызывать `dodnld.py` без окна браузера.
+
+Примеры с **`--cast-list`** (создать `download/{SLUG}/LIST.TXT`):
 
 ```bash
 python get_title.py "https://supjav.com/category/cast/kijima-airi" --cast-list
+```
+
+```bash
+python get_title.py "https://supjav.com/category/cast/kijima-airi" --cast-list --visual
+```
+
+```bash
 python get_title.py "https://supjav.com/category/cast/kasumi-risa" --cast-list --visual
 ```
 
-**Обработать LIST.TXT — скачать все Reducing Mosaic фильмы:**
+Примеры с **`--process-list`** (скачать из `download/kijima-airi/LIST.TXT`):
 
 ```bash
 python get_title.py --process-list kijima-airi
 ```
 
-Создаёт папки вида `download/kijima-airi/EBOD-723 UNC [2023.08.09]/EBOD-723_UNCENSORED.m4v`.
+```bash
+python get_title.py --process-list kijima-airi --visual
+```
 
-**Обработать LIST.TXT — скачать censored фильмы (с пустыми labels):**
+```bash
+python get_title.py --process-list kijima-airi --no-visual
+```
 
 ```bash
 python get_title.py --process-list kijima-airi --censored
 ```
 
-Создаёт папки вида `download/kijima-airi/EBOD-723 C [2023.08.09]/EBOD-723.m4v`.
-
-**Пере-скачать (даже если уже есть в БД):**
-
 ```bash
 python get_title.py --process-list kijima-airi --redownload
+```
+
+```bash
 python get_title.py --process-list kijima-airi --censored --redownload
+```
+
+Сначала список, затем загрузка (тот же `SLUG`):
+
+```bash
+python get_title.py "https://supjav.com/category/cast/kijima-airi" --cast-list --visual
+```
+
+```bash
+python get_title.py --process-list kijima-airi --visual
+```
+
+Одна видео-страница (без `--cast-list` / `--process-list`):
+
+```bash
+python get_title.py "https://supjav.com/411204.html"
 ```
 
 ---
@@ -164,10 +190,8 @@ python c:/projects/JAV/cut_video.py --input "NSFS-061_UNCENSORED.m4v" --output "
 ```
 
 ```bash
-
+python c:/projects/JAV/cut_video.py -i "clip.m4v" -o "fragment.m4v" --start "00:02:10" --end "00:05:30"
 ```
-
-
 
 
 ## How it works (dodnld.py)
@@ -185,7 +209,7 @@ python c:/projects/JAV/cut_video.py --input "NSFS-061_UNCENSORED.m4v" --output "
 
 - **Default mode:** extracts title, code, cast, cover image from a video page, then calls dodnld.py.
 - **`--cast-list`:** walks all pagination pages of an actress, saves URLs/codes/dates/labels to LIST.TXT.
-- **`--process-list`:** reads LIST.TXT, filters by label (`Reducing Mosaic` or empty for `--censored`), downloads each film, validates with ffprobe, saves to SQLite DB.
+- **`--process-list`:** reads LIST.TXT, filters by label (`Reducing Mosaic`, `Uncensored Leak`, or empty for `--censored`), downloads each film, validates with ffprobe, saves to SQLite DB.
 
 ## Notes
 

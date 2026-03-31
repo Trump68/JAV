@@ -1,0 +1,29 @@
+---
+description: Read and maintain project Memory Bank for Cursor agent context
+alwaysApply: true
+---
+
+# Memory Bank (проект JAV)
+
+## В начале задачи
+
+Перед существенной работой по коду или архитектуре репозитория **прочитай все файлы** в каталоге `memory-bank/`:
+
+- `projectbrief.md`
+- `productContext.md`
+- `systemPatterns.md`
+- `techContext.md`
+- `activeContext.md`
+- `progress.md`
+
+Используй их как краткий контекст проекта; детали CLI и поведения сверяй с `README.md` и исходниками.
+
+## Когда обновлять
+
+- После заметных изменений в скриптах, зависимостях или рабочих процессах — поправь соответствующие разделы (часто `systemPatterns.md`, `techContext.md`, `progress.md`).
+- Текущий фокус и ближайшие шаги — в `activeContext.md`.
+- По явной просьбе пользователя **«update memory bank»** — просмотри **все** файлы в `memory-bank/` и приведи их в соответствие с реальным состоянием репозитория.
+
+## Не дублировать без нужды
+
+Memory Bank — сжатое резюме. Не копируй в него целые таблицы параметров из README, если достаточно ссылки на README и одной фразы о назначении.

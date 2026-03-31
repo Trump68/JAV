@@ -11,8 +11,8 @@ Utility for Supjav:
    movie_page_url,CODE,upload_date,labels_without_brackets
 
 3) Process-list mode (--process-list CAST_SLUG): read download/{CAST_SLUG}/LIST.TXT
-   and for each line that has 'Reducing Mosaic' in labels, call dodnld.py to
-   download the movie into download/{CAST_SLUG}/{CODE}/...
+   and for each line whose labels contain 'Reducing Mosaic' or 'Uncensored Leak',
+   call dodnld.py to download into download/{CAST_SLUG}/{CODE} UNC/LKD [date]/...
 """
 
 import argparse
@@ -343,7 +343,7 @@ def main() -> int:
     parser.add_argument(
         "--process-list",
         metavar="CAST_SLUG",
-        help="Process existing download/{CAST_SLUG}/LIST.TXT: for each 'Reducing Mosaic' entry call dodnld.py to download into that actress folder.",
+        help="Process download/{CAST_SLUG}/LIST.TXT: each 'Reducing Mosaic' (… UNC …, _UNCENSORED.m4v) or 'Uncensored Leak' (… LKD …, _LEAKED.m4v); --censored: empty labels.",
     )
     parser.add_argument(
         "--visual",
@@ -424,12 +424,18 @@ def main() -> int:
                 folder_name = f"{code} C [{date_str}]" if date_str else f"{code} C"
                 filename = f"{code}.m4v"
             else:
-                if "reducing mosaic" not in labels.lower():
-                    continue
-                type_str = "Reducing Mosaic"
+                labels_l = labels.lower()
                 date_str = date or ""
-                folder_name = f"{code} UNC [{date_str}]" if date_str else f"{code} UNC"
-                filename = f"{code}_UNCENSORED.m4v"
+                if "reducing mosaic" in labels_l:
+                    type_str = "Reducing Mosaic"
+                    folder_name = f"{code} UNC [{date_str}]" if date_str else f"{code} UNC"
+                    filename = f"{code}_UNCENSORED.m4v"
+                elif "uncensored leak" in labels_l:
+                    type_str = "Uncensored Leak"
+                    folder_name = f"{code} LKD [{date_str}]" if date_str else f"{code} LKD"
+                    filename = f"{code}_LEAKED.m4v"
+                else:
+                    continue
 
             # If video + POSTER already exist, do not resume/re-download.
             # POSTER is saved only after successful download in this script,

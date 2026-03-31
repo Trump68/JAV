@@ -228,7 +228,19 @@ def is_stream_output(url: str) -> bool:
         return True
     if ".mp4" in lower and any(x in lower for x in ("growcdnssedge", "media-hls.growcdnssedge")):
         return False  # skip ad CDN segments
-    if any(x in lower for x in ("turbovidhls.com/t/", "supremejav.com/supjav", "turboviplay.com", "turbosplayer.com", "doppiocdn.com", "streamtape")):
+    if any(
+        x in lower
+        for x in (
+            "turbovidhls.com/t/",
+            "supremejav.com/supjav",
+            "turboviplay.com",
+            "turbosplayer.com",
+            "doppiocdn.com",
+            "streamtape",
+            "streamta.pe",
+            "strtape.",
+        )
+    ):
         return True  # player page or video CDN
     if lower.startswith("blob:"):
         return True  # blob URL can be the active video
@@ -472,6 +484,8 @@ PLAYER_IFRAME_SRC_SUBSTRINGS = (
     "dianaavoidthey",
     "supjav.com",  # same-origin player
     "streamtape",
+    "streamta.pe",
+    "strtape.",
 )
 
 
@@ -787,11 +801,19 @@ def extract_stream_urls(page_url: str, server_tabs: list[str] | None = None, for
                             except Exception:
                                 pass
                         elif label == "ST":
-                            # ST (Streamtape): wait for player iframe, click inside to start stream and capture get_video
+                            # ST (Streamtape + mirrors streamta.pe / strtape.*): iframe src may not contain "streamtape"
                             try:
-                                page.wait_for_selector("iframe[src*='streamtape'], iframe[src^='http']", timeout=12_000)
+                                page.wait_for_selector(
+                                    "iframe[src*='streamtape'], iframe[src*='streamta.'], iframe[src*='strtape'], iframe[src^='http']",
+                                    timeout=12_000,
+                                )
                                 page.wait_for_timeout(1500)
-                                iframe_el = page.query_selector("iframe[src*='streamtape']") or page.query_selector("iframe[src^='http']")
+                                iframe_el = (
+                                    page.query_selector("iframe[src*='streamtape']")
+                                    or page.query_selector("iframe[src*='streamta.']")
+                                    or page.query_selector("iframe[src*='strtape']")
+                                    or page.query_selector("iframe[src^='http']")
+                                )
                                 if iframe_el:
                                     frame = iframe_el.content_frame()
                                     if frame:
@@ -933,7 +955,7 @@ def get_downloadable_url(
         return None
 
     # Streamtape: prefer get_video URL (downloadable) over embed /e/ (yt-dlp can't use it)
-    get_video = [u for u in candidates if "streamtape" in u.lower() and "get_video" in u.lower()]
+    get_video = [u for u in candidates if _is_streamtape_like_url(u) and "get_video" in u.lower()]
     if get_video:
         return get_video[0]
 
@@ -1011,11 +1033,66 @@ LAST_DOWNLOAD_URL_FILE = Path(__file__).resolve().parent / "last_download_url.tx
 STREAM_URLS_LOG = Path(__file__).resolve().parent / "stream_urls.log"
 
 # Target stream URL pattern: all substrings must be present (query params may vary between runs)
+# (Legacy one-page fingerprint; see _is_target_stream_match below for dynamic match.)
 TARGET_STREAM_URL_PARTS = (
     "edgeon-bandwidth.com",
     "1im9wjkozr96",
     "index-v1-a1.m3u8",
 )
+
+# HLS from these hosts is the real Supjav player/CDN — not preroll/ad networks.
+_TRUSTED_STREAM_CDN_MARKERS: tuple[str, ...] = (
+    "doppiocdn.com",
+    "edgeon-bandwidth.com",
+    "turbovidhls.com",
+    "turboviplay.com",
+    "turbosplayer.com",
+    "supremejav.com",
+    "dianaavoidthey",
+    "voe.sx",
+    "guardianagainstyou",
+    "streamtape.com",
+    "streamtape.xyz",
+    "streamta.pe",
+    "strtape.",
+    "tapecontent.net",
+    "tapewithadblock",
+    "get_video",
+    "supjav.com@",
+    ".urlset/",
+    "master.txt",
+    "fc2stream",
+)
+
+# Streamtape embed/CDN mirrors (Supjav may use streamta.pe / strtape.* — not matched by "streamtape" in url).
+_STREAMTAPE_URL_MARKERS: tuple[str, ...] = (
+    "streamtape.com",
+    "streamtape.xyz",
+    "streamta.pe",
+    "strtape.",
+    "tapecontent.net",
+    "tapewithadblock",
+)
+
+
+def _is_streamtape_like_url(url: str) -> bool:
+    """Streamtape and common mirrors (HLS/get_video may live on these hosts)."""
+    if not url:
+        return False
+    lower = url.lower()
+    return any(m in lower for m in _STREAMTAPE_URL_MARKERS)
+
+
+def _is_trusted_stream_cdn(url: str) -> bool:
+    lower = url.lower()
+    return any(m in lower for m in _TRUSTED_STREAM_CDN_MARKERS)
+
+
+def _extract_video_code_from_title(title: str) -> str | None:
+    if not title:
+        return None
+    m = re.search(r"\b([A-Z]{2,5}-\d{3,5})\b", title, re.I)
+    return m.group(1).lower() if m else None
 
 
 def _visual_log(msg: str, log_file: Path | None = None) -> None:
@@ -1061,7 +1138,7 @@ def _is_downloadable_stream_url(url: str | None) -> bool:
     )
     if any(b in lower for b in blocked):
         return False
-    if "streamtape" in lower and "/e/" in lower and "get_video" not in lower:
+    if _is_streamtape_like_url(url) and "/e/" in lower and "get_video" not in lower:
         return False
     path_part = lower.split("?")[0]
     _junk_exts = (".js", ".css", ".gif", ".png", ".jpg", ".jpeg", ".svg", ".webp", ".woff", ".woff2", ".json", ".ico")
@@ -1253,9 +1330,6 @@ def run_visual_mode(
                 timeline_entries.append((ts, action))
                 _visual_log(f"[TIMELINE] {ts} {action}")
 
-            def _is_target_stream_url(url: str) -> bool:
-                return all(part in url for part in TARGET_STREAM_URL_PARTS)
-
             log("visual_mode started")
             timeline("start")
             log(f"goto {page_url}")
@@ -1274,8 +1348,20 @@ def run_visual_mode(
             download_finished_ref: list = [None]
             download_thread_ref: list = [None]
             visual_auto_download_started_ref: list = [False]
+            video_code_ref: list[str | None] = [None]  # e.g. abc-123 from title; used to reject ad HLS on TV/ST
             # fst vs FST breaks on_response (is_st_tv_m3u8, FST bypass) — align with CLI.
             server_tab = requested_server_tab
+
+            def _is_target_stream_url(url: str) -> bool:
+                if all(part in url for part in TARGET_STREAM_URL_PARTS):
+                    return True
+                lower = url.lower()
+                vc = video_code_ref[0]
+                if vc and vc in lower and ".m3u8" in lower and _is_trusted_stream_cdn(url):
+                    return True
+                if "edgeon-bandwidth.com" in lower and "index-v1-a1.m3u8" in lower:
+                    return True
+                return False
 
             def _tab_log(msg: str) -> None:
                 _visual_log(f"[tab] {msg}")
@@ -1336,8 +1422,10 @@ def run_visual_mode(
             def _is_ad_like_stream_url(url: str) -> bool:
                 lower = url.lower()
                 ad_tokens = (
-                    "/ads/", "ad_", "_ad", "preroll", "vast", "doubleclick", "googlesyndication",
+                    "/ads/", "ad_", "_ad", "preroll", "midroll", "postroll", "vast", "vmap",
+                    "doubleclick", "googlesyndication", "pubads", "2mdn.net",
                     "adservice", "adserver", "promo", "banner", "tracking", "pixel",
+                    "ssai", "dai.google", "fwmrm.net", "interstitial", "adpod",
                 )
                 return any(tok in lower for tok in ad_tokens)
 
@@ -1369,7 +1457,7 @@ def run_visual_mode(
                     score += 80
                 if "master.m3u8" in lower or "urlset" in lower:
                     score += 30
-                if "streamtape" in lower and "get_video" in lower:
+                if _is_streamtape_like_url(url) and "get_video" in lower:
                     score += 100
                 # Prefer higher quality variants when present in URL (e.g. 240p/720p/1080p).
                 m = re.search(r"(\d{3,4})p", lower)
@@ -1381,6 +1469,11 @@ def run_visual_mode(
                 # Penalize ad-like links heavily.
                 if _is_ad_like_stream_url(lower):
                     score -= 500
+                if _is_trusted_stream_cdn(url):
+                    score += 120
+                vc = video_code_ref[0]
+                if vc and vc in lower:
+                    score += 200
                 return score
 
             def _set_stream_url(url, response, *, force: bool = False):
@@ -1395,6 +1488,19 @@ def run_visual_mode(
                 if not force and _is_ad_like_stream_url(url):
                     _tab_log(f"reject ad-like: {url[:160]}")
                     return
+                # TV/ST: preroll/ad HLS often comes from generic CDNs — only keep real player hosts or URL containing title code.
+                if (
+                    not force
+                    and server_tab in ("TV", "ST")
+                    and ".m3u8" in url.lower()
+                ):
+                    if _is_trusted_stream_cdn(url) or _is_streamtape_like_url(url):
+                        pass
+                    elif video_code_ref[0] and video_code_ref[0] in url.lower():
+                        pass
+                    else:
+                        _tab_log(f"reject TV/ST m3u8 (not trusted player CDN / no title code in URL): {url[:160]}")
+                        return
                 # Reject explicit low-quality variants (<720p) for all tabs.
                 if not force:
                     q = _quality_from_url(url)
@@ -1428,7 +1534,7 @@ def run_visual_mode(
                     _tab_log(f"skip by url_not_skipped: {url[:160]}")
                     return
                 is_st_tv_m3u8 = server_tab in ("ST", "TV", "FST") and ".m3u8" in lower
-                is_streamtape = "streamtape" in lower and (
+                is_streamtape = _is_streamtape_like_url(url) and (
                     ".m3u8" in lower or ".mp4" in lower or "get_video" in lower or "/file/" in lower or "/e/" in lower or is_media
                 )
                 _tab_log(
@@ -1479,6 +1585,12 @@ def run_visual_mode(
             log("cloudflare_wait_done")
             timeline("cloudflare_passed")
             page.wait_for_timeout(2000)
+            try:
+                video_code_ref[0] = _extract_video_code_from_title(page.title() or "")
+                if video_code_ref[0]:
+                    log(f"video_code_from_title: {video_code_ref[0]}")
+            except Exception:
+                pass
             page.evaluate("""() => {
                 document.querySelectorAll('a.btn-server[target="_blank"]').forEach(a => { a.removeAttribute('target'); });
             }""")
@@ -1820,7 +1932,7 @@ def run_visual_mode(
                             if f == page.main_frame:
                                 continue
                             furl = f.url or ""
-                            if "streamtape" in furl.lower() or "supremejav" in furl.lower():
+                            if _is_streamtape_like_url(furl) or "supremejav" in furl.lower():
                                 return True
                         return False
                     if not _st_iframe_loaded():
@@ -2240,7 +2352,10 @@ def run_visual_mode(
                     on_player_page = current_url != page_url
                     if not on_player_page:
                         try:
-                            if page.query_selector("iframe[src*='supremejav'], iframe[src*='dianaavoidthey'], iframe[src*='turbovid'], iframe[src*='doppio'], iframe[src*='streamtape']"):
+                            if page.query_selector(
+                                "iframe[src*='supremejav'], iframe[src*='dianaavoidthey'], iframe[src*='turbovid'], "
+                                "iframe[src*='doppio'], iframe[src*='streamtape'], iframe[src*='streamta.'], iframe[src*='strtape']"
+                            ):
                                 on_player_page = True
                         except Exception:
                             pass
@@ -2276,6 +2391,8 @@ def run_visual_mode(
                                         for sel in (
                                             "iframe[src*='streamtape']",
                                             "iframe[src*='streamtape.']",
+                                            "iframe[src*='streamta.']",
+                                            "iframe[src*='strtape']",
                                             "iframe[src*='supremejav']",
                                         ):
                                             loc = page.locator(sel).first
@@ -2293,7 +2410,7 @@ def run_visual_mode(
                                             try:
                                                 furl = (frame.url or "").lower()
                                                 # ST embed often loads supremejav wrapper first; match _st_iframe_loaded.
-                                                if "streamtape" in furl or "supremejav" in furl:
+                                                if _is_streamtape_like_url(furl) or "supremejav" in furl:
                                                     try:
                                                         fel = frame.frame_element()
                                                     except Exception:
@@ -2315,7 +2432,13 @@ def run_visual_mode(
                                     pass
                                     # If no bounding box from frame_element, try to find the iframe via selector
                                     if (not box or box.get("width", 0) < 100 or box.get("height", 0) < 50) and not fel:
-                                        for iframe_sel in ["iframe[src*='streamtape']", "iframe[src*='supremejav']", "iframe"]:
+                                        for iframe_sel in [
+                                            "iframe[src*='streamtape']",
+                                            "iframe[src*='streamta.']",
+                                            "iframe[src*='strtape']",
+                                            "iframe[src*='supremejav']",
+                                            "iframe",
+                                        ]:
                                             try:
                                                 iel = page.locator(iframe_sel).first
                                                 if iel.is_visible(timeout=500):
@@ -2670,7 +2793,7 @@ def _parse_ytdlp_progress(line: str) -> str | None:
 def resolve_streamtape_direct_url(embed_url: str, referer: str = "https://supjav.com/") -> str | None:
     """Open Streamtape embed page (/e/...), get direct video URL from DOM (get_video) or network, return it.
     yt-dlp does not support streamtape; we need the direct URL for generic download."""
-    if "streamtape" not in embed_url.lower() or "/e/" not in embed_url:
+    if not _is_streamtape_like_url(embed_url) or "/e/" not in embed_url:
         return None
     video_urls: list[str] = []
     get_video_urls: list[str] = []
@@ -2849,9 +2972,9 @@ def _download_direct_http(
             # Streamtape (ST) tends to fluctuate; show speed/ETA based on the last N seconds
             # rather than averaging from the beginning of the session.
             is_streamtape_like = (
-                "streamtape" in url.lower()
+                _is_streamtape_like_url(url)
                 or "tapecontent" in url.lower()
-                or (referer or "").lower().find("streamtape") >= 0
+                or _is_streamtape_like_url(referer or "")
             )
             speed_window_seconds = 5 * 60
             speed_window_samples: deque[tuple[float, int]] = deque()
@@ -3013,7 +3136,7 @@ def download_video(
     If out_proc is a list, the Popen process is appended so caller can kill it to stop and save.
     If stopped_by_user is set by caller when killing, we return True (partial file saved)."""
     streamtape_retry_url = None
-    if "streamtape" in url.lower() and "get_video" in url.lower():
+    if _is_streamtape_like_url(url) and "get_video" in url.lower():
         streamtape_retry_url = url
         if progress_callback:
             try:
@@ -3027,7 +3150,7 @@ def download_video(
             url = final
         else:
             print(f"Could not resolve get_video redirect, using as-is", file=sys.stderr)
-    elif "streamtape.com/e/" in url or "streamtape.xyz/e/" in url:
+    elif _is_streamtape_like_url(url) and "/e/" in url:
         streamtape_retry_url = url
         if progress_callback:
             try:
@@ -3047,7 +3170,7 @@ def download_video(
     output_path = Path(output_path).resolve()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     dl_referer = referer
-    if "streamtape" in url.lower() or "tapecontent" in url.lower():
+    if _is_streamtape_like_url(url) or "tapecontent" in url.lower():
         dl_referer = "https://streamtape.com/"
     # Direct HTTP download for CDN URLs (tapecontent.net etc.) — yt-dlp hangs on these
     if "tapecontent" in url.lower() or (url.lower().endswith(".mp4") and "get_video" not in url.lower()):
