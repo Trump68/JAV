@@ -460,7 +460,20 @@ def main() -> int:
             total += 1
             output_path_arg = f"{cast_slug}/{folder_name}/{filename}"
             print(f"[PROCESS] {idx}: {url} -> {output_path_arg}", file=sys.stderr)
-            dodnld_cmd = [sys.executable, str(dodnld_py), url, "-o", output_path_arg]
+            progress_tab = (args.server_tab or "VOE").split(",")[0].strip().upper() or "VOE"
+            dodnld_cmd = [
+                sys.executable,
+                str(dodnld_py),
+                url,
+                "-o",
+                output_path_arg,
+                "--progress-slug",
+                cast_slug,
+                "--progress-code",
+                code,
+                "--progress-tab",
+                progress_tab,
+            ]
             if use_visual:
                 dodnld_cmd.insert(-2, "--visual")
             if getattr(args, "skip_st", False):

@@ -44,6 +44,9 @@ Python scripts that open Supjav video pages, load the player (by switching serve
 | `--visual` | `-v` | Визуальный режим с окном браузера |
 | `--no-auto-download` | | Не начинать скачивание автоматически (только с `--visual`) |
 | `--server-tab TAB` | `-s` | Вкладка сервера: `VOE` (по умолчанию, пробует VOE → TV → ST), `ST`, `TV`, `FST` |
+| `--progress-slug SLUG` | | Префикс в **консоли** при закачке (`-d` и визуальный режим): **`SLUG: CODE (TAB)`**, затем полоса; на всех вкладках вкладка берётся из `-s` / активной вкладки и уточняется по URL (VOE/ST); `get_title --process-list` задаёт `SLUG` и `CODE` |
+| `--progress-code CODE` | | Код фильма в префиксе; если не задан — из заголовка страницы |
+| `--progress-tab TAB` | | Вкладка в скобках; если не задано — первый `-s` или `VOE`, для части URL подменяется на ST/VOE |
 
 **Только вывести URL потока (страница по умолчанию):**
 

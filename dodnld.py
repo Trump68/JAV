@@ -1032,6 +1032,94 @@ DOWNLOAD_DIR = Path(__file__).resolve().parent / "download"
 LAST_DOWNLOAD_URL_FILE = Path(__file__).resolve().parent / "last_download_url.txt"
 STREAM_URLS_LOG = Path(__file__).resolve().parent / "stream_urls.log"
 
+# Set for CLI download progress lines: e.g. "kijima-airi: JUX-203 (FST) " + bar/percent…
+_CONSOLE_PROGRESS_PREFIX: str = ""
+
+
+def _build_console_progress_prefix(slug: str, code: str, tab: str) -> str:
+    slug, code, tab = slug.strip(), code.strip(), tab.strip()
+    if slug:
+        if code and tab:
+            return f"{slug}: {code} ({tab}) "
+        if code:
+            return f"{slug}: {code} "
+        if tab:
+            return f"{slug}: ({tab}) "
+        return f"{slug}: "
+    if code and tab:
+        return f"{code} ({tab}) "
+    if code:
+        return f"{code} "
+    if tab:
+        return f"({tab}) "
+    return ""
+
+
+def _progress_tab_from_download_url(download_url: str, fallback: str) -> str:
+    """Best-effort tab label for progress line: VOE/ST from URL hints, else requested tab (TV, FST, …)."""
+    u = download_url.lower()
+    fb = (fallback or "").strip().upper() or "VOE"
+    if "supremejav" in u or "turbovidhls.com" in u:
+        return "VOE"
+    if (
+        "streamtape" in u
+        or "streamta." in u
+        or "strtape" in u
+        or "tapecontent" in u
+        or "get_video" in u
+    ):
+        return "ST"
+    return fb
+
+
+def _movie_code_for_progress_line(output_filename: str, video_code: str | None) -> str:
+    if video_code:
+        return str(video_code).strip().upper()
+    m = re.search(r"\b([A-Z]{2,5}-\d{3,5})\b", Path(output_filename).name, re.I)
+    return m.group(1).upper() if m else ""
+
+
+def _progress_slug_from_output(output_filename: str) -> str:
+    parts = Path(output_filename).parts
+    if len(parts) >= 3:
+        return parts[0]
+    return ""
+
+
+def _set_console_progress_prefix_for_download(
+    output_filename: str,
+    download_url: str,
+    tab_fallback: str,
+    video_code: str | None,
+    *,
+    progress_slug: str = "",
+    progress_code: str = "",
+    progress_tab: str = "",
+) -> None:
+    global _CONSOLE_PROGRESS_PREFIX
+    slug = (progress_slug or "").strip()
+    if not slug:
+        slug = _progress_slug_from_output(output_filename)
+    code = (progress_code or "").strip().upper()
+    if not code:
+        code = _movie_code_for_progress_line(output_filename, video_code)
+    tab = (progress_tab or "").strip().upper()
+    if not tab:
+        tab = str(tab_fallback or "VOE").split(",")[0].strip().upper() or "VOE"
+    tab = _progress_tab_from_download_url(download_url, tab)
+    _CONSOLE_PROGRESS_PREFIX = _build_console_progress_prefix(slug, code, tab)
+
+
+def _clear_console_progress_prefix() -> None:
+    global _CONSOLE_PROGRESS_PREFIX
+    _CONSOLE_PROGRESS_PREFIX = ""
+
+
+def _prefixed_console_progress_line(line: str) -> str:
+    if not _CONSOLE_PROGRESS_PREFIX:
+        return line
+    return _CONSOLE_PROGRESS_PREFIX + line
+
 # Target stream URL pattern: all substrings must be present (query params may vary between runs)
 # (Legacy one-page fingerprint; see _is_target_stream_match below for dynamic match.)
 TARGET_STREAM_URL_PARTS = (
@@ -2112,14 +2200,23 @@ def run_visual_mode(
 
                             def run_download():
                                 try:
-                                    result = download_video(
+                                    _set_console_progress_prefix_for_download(
+                                        output_filename,
                                         download_url,
-                                        out_path,
-                                        referer=dl_referer,
-                                        progress_callback=progress_from_download_thread,
-                                        out_proc=download_proc_ref,
-                                        stopped_by_user=stopped_by_user_ref,
+                                        str(server_tab),
+                                        video_code_ref[0],
                                     )
+                                    try:
+                                        result = download_video(
+                                            download_url,
+                                            out_path,
+                                            referer=dl_referer,
+                                            progress_callback=progress_from_download_thread,
+                                            out_proc=download_proc_ref,
+                                            stopped_by_user=stopped_by_user_ref,
+                                        )
+                                    finally:
+                                        _clear_console_progress_prefix()
                                     download_proc_ref.clear()
                                     if stopped_by_user_ref[0]:
                                         download_finished_ref[0] = "stopped"
@@ -2299,14 +2396,23 @@ def run_visual_mode(
 
                             def run_download():
                                 try:
-                                    result = download_video(
+                                    _set_console_progress_prefix_for_download(
+                                        output_filename,
                                         download_url,
-                                        out_path,
-                                        referer=dl_referer,
-                                        progress_callback=progress_from_download_thread,
-                                        out_proc=download_proc_ref,
-                                        stopped_by_user=stopped_by_user_ref,
+                                        str(server_tab),
+                                        video_code_ref[0],
                                     )
+                                    try:
+                                        result = download_video(
+                                            download_url,
+                                            out_path,
+                                            referer=dl_referer,
+                                            progress_callback=progress_from_download_thread,
+                                            out_proc=download_proc_ref,
+                                            stopped_by_user=stopped_by_user_ref,
+                                        )
+                                    finally:
+                                        _clear_console_progress_prefix()
                                     download_proc_ref.clear()
                                     if stopped_by_user_ref[0]:
                                         download_finished_ref[0] = "stopped"
@@ -2965,9 +3071,10 @@ def _download_direct_http(
             def _print_progress_line(line: str) -> None:
                 """Print progress in a single console line (overwrite with CR)."""
                 nonlocal last_line_len
-                pad = " " * max(0, last_line_len - len(line))
-                print("\r" + line + pad, end="", flush=True)
-                last_line_len = len(line)
+                full = _prefixed_console_progress_line(line)
+                pad = " " * max(0, last_line_len - len(full))
+                print("\r" + full + pad, end="", flush=True)
+                last_line_len = len(full)
 
             # Streamtape (ST) tends to fluctuate; show speed/ETA based on the last N seconds
             # rather than averaging from the beginning of the session.
@@ -3277,9 +3384,10 @@ def download_video(
 
             def _print_one_line(line: str) -> None:
                 nonlocal last_line_len
-                pad = " " * max(0, last_line_len - len(line))
-                print("\r" + line + pad, end="", flush=True, file=sys.stderr)
-                last_line_len = len(line)
+                full = _prefixed_console_progress_line(line)
+                pad = " " * max(0, last_line_len - len(full))
+                print("\r" + full + pad, end="", flush=True, file=sys.stderr)
+                last_line_len = len(full)
 
             for line in proc.stdout:
                 parsed = _parse_ytdlp_progress(line)
@@ -3424,6 +3532,24 @@ def main() -> int:
         action="store_true",
         help="Skip any ST tab attempts in fallback chain and default VOE order.",
     )
+    parser.add_argument(
+        "--progress-slug",
+        metavar="SLUG",
+        default="",
+        help='Actress/folder label in progress line: "SLUG: CODE (TAB) …" when used with --progress-code.',
+    )
+    parser.add_argument(
+        "--progress-code",
+        metavar="CODE",
+        default="",
+        help='Movie code in progress line (e.g. JUX-203); default from page title if omitted.',
+    )
+    parser.add_argument(
+        "--progress-tab",
+        metavar="TAB",
+        default="",
+        help='Server tab in parentheses (e.g. FST); default: first -s entry or VOE; refined from URL when ST/VOE.',
+    )
     args = parser.parse_args()
 
     if args.visual:
@@ -3475,10 +3601,22 @@ def main() -> int:
         if not out_path.is_absolute():
             out_path = DOWNLOAD_DIR / args.output
         out_path.parent.mkdir(parents=True, exist_ok=True)
-        if download_video(download_url, out_path, referer="https://supjav.com/"):
-            print(f"Saved to: {out_path}", file=sys.stderr)
-            return 0
-        return 1
+        _set_console_progress_prefix_for_download(
+            args.output,
+            download_url,
+            str(args.server_tab),
+            video_code,
+            progress_slug=getattr(args, "progress_slug", "") or "",
+            progress_code=getattr(args, "progress_code", "") or "",
+            progress_tab=getattr(args, "progress_tab", "") or "",
+        )
+        try:
+            if download_video(download_url, out_path, referer="https://supjav.com/"):
+                print(f"Saved to: {out_path}", file=sys.stderr)
+                return 0
+            return 1
+        finally:
+            _clear_console_progress_prefix()
 
     for u in urls:
         print(u)
