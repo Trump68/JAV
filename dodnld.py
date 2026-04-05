@@ -16,7 +16,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 from urllib.parse import urljoin, urlparse
 import urllib.request
 
@@ -486,6 +486,30 @@ PLAYER_IFRAME_SRC_SUBSTRINGS = (
     "streamtape",
     "streamta.pe",
     "strtape.",
+    # FST tab embeds (fc2 / generic players) — must match for try_click_player / bursts
+    "fc2stream",
+    "fc2.to",
+    "javbee",
+    "lysande",
+    "beatbangers",
+    "vidhide",
+    "embedrise",
+    "d0000d",
+    "dood",
+    "streamlare",
+    "vide0.net",
+    "abysscdn",
+)
+
+# Weak hints: large http iframes whose src looks like a player embed (FST fallback if not in list above)
+_FST_IFRAME_SRC_WEAK_HINTS = (
+    "/embed/",
+    "/player/",
+    "/video/",
+    "embed.php",
+    "player.php",
+    "watch?",
+    "/e/",
 )
 
 
@@ -502,6 +526,52 @@ def _frame_is_player_iframe(frame) -> bool:
         return any(s in src for s in PLAYER_IFRAME_SRC_SUBSTRINGS)
     except Exception:
         return False
+
+
+def _iframe_src_blocked_ad(src: str) -> bool:
+    s = (src or "").lower()
+    return any(
+        x in s
+        for x in (
+            "doubleclick",
+            "googlesyndication",
+            "googleads",
+            "adservice",
+            "popads",
+            "exoclick",
+            "propeller",
+            "adsterra",
+            "hilltopads",
+            "bluetraffic",
+            "smartpop",
+        )
+    )
+
+
+def _collect_fst_fallback_iframes(page) -> list[tuple[Any, float]]:
+    """Largest http iframes that look like player embeds but missed PLAYER_IFRAME_SRC_SUBSTRINGS."""
+    out: list[tuple[Any, float]] = []
+    try:
+        for iframe_el in page.query_selector_all("iframe[src]"):
+            try:
+                src = (iframe_el.get_attribute("src") or "").strip()
+                if not src.startswith("http"):
+                    continue
+                if _iframe_src_blocked_ad(src):
+                    continue
+                sl = src.lower()
+                if not any(h in sl for h in _FST_IFRAME_SRC_WEAK_HINTS):
+                    continue
+                box = iframe_el.bounding_box()
+                if not box or box.get("width", 0) < 200 or box.get("height", 0) < 120:
+                    continue
+                out.append((iframe_el, box["width"] * box["height"]))
+            except Exception:
+                continue
+        out.sort(key=lambda x: -x[1])
+    except Exception:
+        pass
+    return out
 
 
 def try_click_player(page) -> bool:
@@ -547,6 +617,17 @@ def try_click_player(page) -> bool:
                         return True
                 except Exception:
                     continue
+            # FST: extra embeds that only match weak URL patterns
+            for iframe_el, _ in _collect_fst_fallback_iframes(page):
+                try:
+                    box = iframe_el.bounding_box()
+                    if box:
+                        cx = box["x"] + box["width"] / 2
+                        cy = box["y"] + box["height"] / 2
+                        page.mouse.click(cx, cy)
+                        return True
+                except Exception:
+                    continue
         except Exception:
             pass
         # 3) Play button only (no generic button/body) inside player iframes
@@ -562,6 +643,93 @@ def try_click_player(page) -> bool:
                             return True
                     except Exception:
                         pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return False
+
+
+def _auto_click_player_for_tab(page, server_tab: str) -> bool:
+    """FST: burst center clicks first (many embeds need it); other tabs: single careful click."""
+    if server_tab == "FST":
+        return bool(try_click_fst_player_burst(page) or try_click_player(page))
+    return bool(try_click_player(page))
+
+
+def try_click_fst_player_burst(
+    page,
+    *,
+    clicks: int = 6,
+    gap_ms: int = 90,
+) -> bool:
+    """
+    FST: several fast clicks on the player (video or iframe center), like VOE double-tap.
+    Many FST embeds only start HLS after multiple center hits.
+    """
+    try:
+        try:
+            page.wait_for_selector("iframe[src^='http']", timeout=2500)
+        except Exception:
+            pass
+        # 1) <video> inside known player frames — burst clicks
+        for frame in page.frames:
+            if not _frame_is_player_iframe(frame):
+                continue
+            try:
+                video = frame.locator("video").first
+                if video.is_visible(timeout=700):
+                    for i in range(clicks):
+                        video.click(force=True, timeout=700)
+                        if i + 1 < clicks:
+                            page.wait_for_timeout(gap_ms)
+                    return True
+            except Exception:
+                pass
+        # 2) Largest matching iframe center — burst
+        player_iframes: list = []
+        for iframe_el in page.query_selector_all("iframe"):
+            try:
+                src = (iframe_el.get_attribute("src") or "").lower()
+                if not any(s in src for s in PLAYER_IFRAME_SRC_SUBSTRINGS):
+                    continue
+                if _iframe_src_blocked_ad(src):
+                    continue
+                box = iframe_el.bounding_box()
+                if not box or box.get("width", 0) < 180 or box.get("height", 0) < 120:
+                    continue
+                player_iframes.append((iframe_el, box["width"] * box["height"]))
+            except Exception:
+                continue
+        player_iframes.sort(key=lambda x: -x[1])
+        for iframe_el, _ in player_iframes[:1]:
+            try:
+                box = iframe_el.bounding_box()
+                if not box:
+                    continue
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                page.mouse.move(cx, cy)
+                for i in range(clicks):
+                    page.mouse.click(cx, cy)
+                    if i + 1 < clicks:
+                        page.wait_for_timeout(gap_ms)
+                return True
+            except Exception:
+                pass
+        for iframe_el, _ in _collect_fst_fallback_iframes(page)[:1]:
+            try:
+                box = iframe_el.bounding_box()
+                if not box:
+                    continue
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                page.mouse.move(cx, cy)
+                for i in range(clicks):
+                    page.mouse.click(cx, cy)
+                    if i + 1 < clicks:
+                        page.wait_for_timeout(gap_ms)
+                return True
             except Exception:
                 pass
     except Exception:
@@ -1665,7 +1833,6 @@ def run_visual_mode(
                     and stream_url_for_download[0]
                     and _is_downloadable_stream_url(stream_url_for_download[0])
                     and not download_proc_ref
-                    and download_thread_ref[0] is None
                     and not visual_auto_download_started_ref[0]
                 ):
                     auto_download_pending_ref[0] = True
@@ -2303,8 +2470,18 @@ def run_visual_mode(
                                     stream_referer_for_download[0] = None
                                     target_stream_seen_ref[0] = False
                                     explicit_low_quality_seen_ref[0] = False
+                                    # Allow another auto-download attempt on this tab (same issue as multi-tab fallback).
+                                    visual_auto_download_started_ref[0] = False
+                                    download_thread_ref[0] = None
                                     continue
                                 fallback_tab = "FST" if server_tab == "TV" else "ST"
+                                if fallback_tab == "ST" and skip_st:
+                                    log(
+                                        f"Download {'failed' if dl_failed else 'timed out'} on {server_tab}; "
+                                        "skip_st is set — no ST fallback, stopping."
+                                    )
+                                    stop_event.set()
+                                    continue
                                 log(
                                     f"Download {'failed' if dl_failed else 'timed out'} on {server_tab}, "
                                     f"switching to {fallback_tab}..."
@@ -2323,6 +2500,10 @@ def run_visual_mode(
                                 stream_referer_for_download[0] = None
                                 target_stream_seen_ref[0] = False
                                 auto_download_pending_ref[0] = False
+                                # Otherwise on_response / main loop never re-arm auto_download_pending
+                                # (guards use visual_auto_download_started_ref and download_thread_ref).
+                                visual_auto_download_started_ref[0] = False
+                                download_thread_ref[0] = None
                                 server_tab = fallback_tab
                                 dismiss_ad_overlays(page)
                                 page.wait_for_timeout(500)
@@ -2819,12 +3000,13 @@ def run_visual_mode(
                                 for _ in range(3):
                                     try_close_ad_overlay(page)
                                     page.wait_for_timeout(300)
-                                if try_click_player(page):
+                                if _auto_click_player_for_tab(page, server_tab):
                                     timeline("auto_click_player")
                                     _visual_log(f"auto_click_player: {server_tab} attempt {attempt + 1} click 1")
                                 page.wait_for_timeout(500)
                                 if server_tab in ("TV", "FST", "ST"):
-                                    page.wait_for_timeout(10_000)
+                                    # FST: shorter wait — burst already fired several hits; long idle delays startup.
+                                    page.wait_for_timeout(4_000 if server_tab == "FST" else 10_000)
                                     current_url = page.url
                                     if any(dom in current_url for dom in BLOCKED_REDIRECT_DOMAINS) or not any(dom in current_url for dom in ALLOWED_MAIN_DOMAINS):
                                         _visual_log(f"auto_click_player: {server_tab} — forbidden site after wait, going back")
@@ -2834,7 +3016,7 @@ def run_visual_mode(
                                         except Exception:
                                             pass
                                         continue
-                                    if try_click_player(page):
+                                    if _auto_click_player_for_tab(page, server_tab):
                                         timeline(f"auto_click_player_second_{server_tab.lower()}")
                                         _visual_log(f"auto_click_player: {server_tab} attempt {attempt + 1} click 2")
                                     page.wait_for_timeout(2_000)
@@ -2846,7 +3028,7 @@ def run_visual_mode(
                                         except Exception:
                                             pass
                                         continue
-                                    if try_click_player(page):
+                                    if _auto_click_player_for_tab(page, server_tab):
                                         timeline(f"auto_click_player_third_{server_tab.lower()}")
                                         _visual_log(f"auto_click_player: {server_tab} attempt {attempt + 1} click 3")
                                     page.wait_for_timeout(500)
@@ -2864,7 +3046,7 @@ def run_visual_mode(
                                         _visual_log(f"auto_click_player: {server_tab} — only explicit <720 seen; switching to next fallback")
                                         break
                                 if not target_stream_seen_ref[0]:
-                                    if try_click_player(page):
+                                    if _auto_click_player_for_tab(page, server_tab):
                                         _visual_log("auto_click_player: extra click (stream not found)")
                                     page.wait_for_timeout(300)
                                     page.wait_for_timeout(5_000)
