@@ -91,6 +91,8 @@ python dodnld.py "https://supjav.com/411204.html" -v --server-tab FST
 
 При VOE — автоматически пробует VOE → TV → ST при неудаче. При указании ST или TV — если скачивание падает, переключается на ST как fallback.
 
+В **визуальном** режиме на вкладке **FST** ожидание **скачиваемого** URL потока ограничено **120 секундами**: после таймаута — переход на **ST** (если не режим «одна вкладка» и не `--skip-st`) или остановка.
+
 ---
 
 ### get_title.py — заголовок, постер, пакетная загрузка
@@ -110,6 +112,23 @@ python dodnld.py "https://supjav.com/411204.html" -v --server-tab FST
 **Режим `--cast-list`:** `url` — страница актрисы (`https://supjav.com/category/cast/{SLUG}`). Обход пагинации; результат **`download/{SLUG}/LIST.TXT`** (последний сегмент пути = `SLUG`).
 
 **Режим `--process-list SLUG`:** читает **`download/{SLUG}/LIST.TXT`**. Без `--censored` обрабатываются строки, где в labels есть **Reducing Mosaic** (папка `CODE UNC [дата]/`, файл `CODE_UNCENSORED.m4v`) или **Uncensored Leak** (папка `CODE LKD [дата]/`, файл `CODE_LEAKED.m4v`, например `WANZ-377 LKD [2023.06.24]` / `WANZ-377_LEAKED.m4v`). С `--censored` — строки с пустым label (`… C [дата]/`, `CODE.m4v`). Уже скачанное — в SQLite **`downloads.db`**; `--redownload` заставляет качать снова. `--no-visual` — вызывать `dodnld.py` без окна браузера.
+
+Удаление записи из `downloads.db` по `slug` фильма:
+
+```bash
+# удалить все записи фильма (slug = код, например JUX-203)
+sqlite3 c:/Projects/JAV/downloads.db "DELETE FROM downloads WHERE slug = 'JUX-203';"
+```
+
+```bash
+# удалить только конкретный тип/дату
+sqlite3 c:/Projects/JAV/downloads.db "DELETE FROM downloads WHERE slug = 'JUX-203' AND type = 'Reducing Mosaic' AND upload_date = '2023.06.24';"
+```
+
+```bash
+# проверить, что осталось
+sqlite3 c:/Projects/JAV/downloads.db "SELECT slug, type, upload_date FROM downloads WHERE slug = 'JUX-203';"
+```
 
 Примеры с **`--cast-list`** (создать `download/{SLUG}/LIST.TXT`):
 
@@ -181,6 +200,8 @@ python get_title.py "https://supjav.com/411204.html"
 - `--output/-o` — выходной файл
 - `--start` — время начала (например `00:02:10` или `130.5`)
 - `--end` — время конца (например `00:05:30` или `330`)
+- `--task` — путь к файлу задач (`STEP=start->end,...`), вырезать все STEP-фрагменты и склеить в `--output`
+- `--task-out` — куда сохранить **копию** task-файла с **пересчитанными** якорями под таймлайн выхода (по умолчанию рядом с `--output`: `<имя_выхода>_task.txt`, например `highlights_task.txt`)
 - `--mode`:
   - `reencode` (по умолчанию) — более точная нарезка (перекодирование)
   - `copy` — без перекодирования (быстрее, но рез может “съехать” на keyframe)
@@ -195,6 +216,24 @@ python c:/projects/JAV/cut_video.py --input "NSFS-061_UNCENSORED.m4v" --output "
 ```bash
 python c:/projects/JAV/cut_video.py -i "clip.m4v" -o "fragment.m4v" --start "00:02:10" --end "00:05:30"
 ```
+
+```bash
+python c:/projects/JAV/cut_video.py -i "NSFS-061_UNCENSORED.m4v" -o "highlights.m4v" --task "task.txt" --mode copy
+```
+
+Пример `task.txt`:
+
+```txt
+STEP=00.17.48.000->00.18.18.000,RUN_1.0,FADE_1
+STEP=00.22.02.000->00.23.05.000,RUN_1.0,FADE_1
+STEP=00.23.05.000->00.23.42.000,RUN_1.0,FADE_1
+STEP=00.24.22.000->00.27.16.000,RUN_1.0,FADE_1
+STEP=00.27.33.000->00.28.31.000,RUN_1.0,FADE_1
+STEP=00.28.37.000->00.28.53.000,RUN_1.0,FADE_1
+STEP=00.29.00.000->00.29.08.000,RUN_1.0,FADE_1
+```
+
+После успешной склейки рядом с `highlights.m4v` появится, например, `highlights_task.txt`: те же комментарии и строки `STEP=...`, но интервалы **в координатах итогового файла** (подряд, от `00.00.00.000`). Строка вида `START=...,END=...` переписывается в диапазон `00.00.00.000` → конец всей нарезки.
 
 
 ## How it works (dodnld.py)
@@ -218,3 +257,9 @@ python c:/projects/JAV/cut_video.py -i "clip.m4v" -o "fragment.m4v" --start "00:
 
 - The target site may change its layout or script logic; selectors and filters might need updates.
 - Respect the site's terms of use and robots.txt when using this tool.
+
+
+
+python c:/projects/JAV/cut_video.py -i "c:\Projects\JAV\download\hayashi-yuna\IENE-531 UNC [2024.02.29]\IENE-531_UNCENSORED.m4v" -o "highlights.m4v" --task "c:\Projects\JAV\download\hayashi-yuna\IENE-531 UNC [2024.02.29]\scenes.txt" --mode copy
+
+python c:/projects/JAV/cut_video.py -i "c:\Projects\JAV\download\usui-saryuu\split_YMN-005 UNC [2024.08.04]\YMN-005_UNCENSORED.m4v" -o "fragment.m4v" --start "01:02:50" --end "01:29:28" --mode copy

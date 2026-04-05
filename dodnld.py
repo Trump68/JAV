@@ -1009,6 +1009,9 @@ def extract_m3u8_from_player_page(player_url: str, referer: str = "https://supja
 
 CLOUDFLARE_WAIT_MS = 12_500  # wait for Cloudflare "Verifying you are human" to pass (half of previous 25s)
 
+# Visual mode: max wall-clock wait on FST for a *downloadable* stream before fallback / stop.
+FST_TAB_MAX_WAIT_S = 120.0
+
 
 def wait_for_cloudflare_pass(page, timeout_ms: int = CLOUDFLARE_WAIT_MS) -> None:
     """Wait until past Cloudflare challenge (page shows VOE/SERVER links)."""
@@ -1437,6 +1440,9 @@ def run_visual_mode(
             download_thread_ref: list = [None]
             visual_auto_download_started_ref: list = [False]
             video_code_ref: list[str | None] = [None]  # e.g. abc-123 from title; used to reject ad HLS on TV/ST
+            # FST: wall-clock deadline (monotonic) to avoid infinite wait on embed-only / stuck player.
+            fst_wall_deadline_ref: list[float | None] = [None]
+            last_tab_for_fst_deadline_ref: list[str | None] = [None]
             # fst vs FST breaks on_response (is_st_tv_m3u8, FST bypass) — align with CLI.
             server_tab = requested_server_tab
 
@@ -1927,6 +1933,7 @@ def run_visual_mode(
                 else:
                     log(f"server_tab_clicked: {server_tab}")
                     page.wait_for_timeout(3000)
+                    _arm_fst_wall_deadline_if_needed()
                 # VOE: verify iframe loaded (page defaults to TV; first click may be eaten by ad overlay)
                 if server_tab == "VOE" and tab_clicked:
                     _VOE_IFRAME_MARKERS = ("dianaavoidthey", "voe.sx", "voe-", "voeunblock", "guardianagainstyou")
@@ -2064,6 +2071,22 @@ def run_visual_mode(
                 log(f"download_button_attach_error (after tab) {ex!r}")
             stop_event = threading.Event()
 
+            def _arm_fst_wall_deadline_if_needed() -> None:
+                if server_tab != last_tab_for_fst_deadline_ref[0]:
+                    last_tab_for_fst_deadline_ref[0] = server_tab
+                    if server_tab == "FST":
+                        fst_wall_deadline_ref[0] = time.monotonic() + FST_TAB_MAX_WAIT_S
+                    else:
+                        fst_wall_deadline_ref[0] = None
+
+            def _fst_wall_timed_out() -> bool:
+                d = fst_wall_deadline_ref[0]
+                return bool(
+                    d is not None
+                    and server_tab == "FST"
+                    and time.monotonic() >= d
+                )
+
             def wait_enter():
                 # In some environments stdin can be closed (no tty), which raises EOFError.
                 # Do not set stop_event on EOF — otherwise visual mode exits immediately and
@@ -2146,6 +2169,24 @@ def run_visual_mode(
                 if stop_event.wait(poll_interval):
                     break
                 try:
+                    _arm_fst_wall_deadline_if_needed()
+                    if _fst_wall_timed_out():
+                        usable_fst = bool(
+                            stream_url_for_download[0]
+                            and _is_downloadable_stream_url(stream_url_for_download[0])
+                        )
+                        if not usable_fst and not download_proc_ref:
+                            prev_fst = server_tab
+                            _switch_to_next_fallback(
+                                f"FST timeout — no downloadable stream within {FST_TAB_MAX_WAIT_S:.0f}s"
+                            )
+                            _arm_fst_wall_deadline_if_needed()
+                            if server_tab == prev_fst == "FST":
+                                log(
+                                    f"FST: no downloadable stream within {FST_TAB_MAX_WAIT_S:.0f}s; stopping."
+                                )
+                                stop_event.set()
+                                continue
                     if download_progress_text_ref[0] is not None:
                         set_download_button_progress(download_progress_text_ref[0])
                     if (
@@ -2746,8 +2787,16 @@ def run_visual_mode(
                             else:
                                 tab_attempts = 4
                                 tab_timeout_s = 60
-                            _visual_log(f"auto_click_player: {server_tab} — scroll + click pattern until stream (timeout ~{tab_timeout_s}s)")
+                            _visual_log(
+                                f"auto_click_player: {server_tab} — scroll + click pattern until stream "
+                                f"(~{tab_timeout_s}s per pass; FST hard cap {FST_TAB_MAX_WAIT_S:.0f}s wall clock)"
+                            )
                             for attempt in range(tab_attempts):  # ~15s per attempt
+                                if server_tab == "FST" and _fst_wall_timed_out():
+                                    _visual_log(
+                                        f"auto_click_player: FST — wall timeout {FST_TAB_MAX_WAIT_S:.0f}s, ending click loop"
+                                    )
+                                    break
                                 if target_stream_seen_ref[0] or stream_url_for_download[0]:
                                     _visual_log(f"auto_click_player: {server_tab} — stream link available")
                                     if stream_url_for_download[0] and _is_downloadable_stream_url(stream_url_for_download[0]) and not auto_download_pending_ref[0]:
@@ -2832,7 +2881,28 @@ def run_visual_mode(
                                                     pass
                                     except Exception:
                                         pass
-                            if not target_stream_seen_ref[0] and not stream_url_for_download[0]:
+                            usable_dl = bool(
+                                stream_url_for_download[0]
+                                and _is_downloadable_stream_url(stream_url_for_download[0])
+                            )
+                            if server_tab == "FST":
+                                if not usable_dl:
+                                    prev_tab = server_tab
+                                    _switch_to_next_fallback(
+                                        f"FST: no downloadable stream after wait (~{tab_timeout_s}s / "
+                                        f"{FST_TAB_MAX_WAIT_S:.0f}s cap)"
+                                    )
+                                    _arm_fst_wall_deadline_if_needed()
+                                    if server_tab == prev_tab:
+                                        _visual_log(
+                                            f"auto_click_player: FST — no downloadable stream within "
+                                            f"~{tab_timeout_s}s or {FST_TAB_MAX_WAIT_S:.0f}s wall clock; stopping"
+                                        )
+                                        log(
+                                            f"FST: no downloadable stream after auto-click / timeout; stopping."
+                                        )
+                                        stop_event.set()
+                            elif not target_stream_seen_ref[0] and not stream_url_for_download[0]:
                                 prev_tab = server_tab
                                 _switch_to_next_fallback(f"no stream within {tab_timeout_s}s")
                                 if server_tab == prev_tab:

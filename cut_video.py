@@ -7,6 +7,8 @@ Examples:
   python cut_video.py --input "in.m4v" --output "out.mp4" --start "00:02:10" --end "00:05:30"
   python cut_video.py --input "in.m4v" --output "out.mp4" --start 130 --end 330 --mode reencode
   python cut_video.py --input "in.mkv" --output "out.mkv" --start "00:00:00" --end "00:00:30" --mode copy
+  python cut_video.py -i "in.m4v" -o "highlights.m4v" --task scenes.txt --mode copy
+    # also writes highlights_task.txt with STEP times on the output timeline
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
@@ -48,6 +51,161 @@ def parse_time_to_seconds(s: str) -> float:
     else:
         hh, mm, ss = parts_f
     return hh * 3600.0 + mm * 60.0 + ss
+
+
+def parse_task_time_to_seconds(s: str) -> float:
+    """
+    Accept task timestamps:
+      - HH.MM.SS.mmm (example: 00.17.48.000)
+      - also supports regular parse_time_to_seconds formats
+    """
+    s = s.strip()
+    if not s:
+        raise ValueError("Empty task time string")
+
+    # HH.MM.SS.mmm -> HH:MM:SS.mmm
+    dot_parts = s.split(".")
+    if len(dot_parts) == 4 and all(p.isdigit() for p in dot_parts):
+        hh, mm, ss, mmm = dot_parts
+        normalized = f"{int(hh):02d}:{int(mm):02d}:{int(ss):02d}.{int(mmm):03d}"
+        return parse_time_to_seconds(normalized)
+
+    return parse_time_to_seconds(s)
+
+
+def parse_task_steps(task_path: Path) -> list[tuple[float, float, str]]:
+    """
+    Parse lines like:
+      STEP=00.17.48.000->00.18.18.000,RUN_1.0,FADE_1
+    Returns list of (start_s, end_s, original_line).
+    """
+    try:
+        raw = task_path.read_text(encoding="utf-8")
+    except OSError as e:
+        raise RuntimeError(f"Cannot read task file: {task_path} ({e})") from e
+
+    steps: list[tuple[float, float, str]] = []
+    for line_no, raw_line in enumerate(raw.splitlines(), start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Optional directives in scene files; not used for cutting yet.
+        upper = line.upper()
+        if (
+            line.startswith("@")
+            or upper.startswith("START=")
+            or upper.startswith("END=")
+            or upper.startswith("BLACK_SCREEN=")
+        ):
+            continue
+        if not line.upper().startswith("STEP="):
+            raise ValueError(
+                f"{task_path}:{line_no}: expected STEP=... line "
+                "(or comment/#, @include, START=..., END=..., BLACK_SCREEN=...)"
+            )
+        body = line[5:].strip()
+        first_field = body.split(",", 1)[0].strip()
+        if "->" not in first_field:
+            raise ValueError(f"{task_path}:{line_no}: expected STEP=start->end")
+        start_raw, end_raw = [x.strip() for x in first_field.split("->", 1)]
+        start_s = parse_task_time_to_seconds(start_raw)
+        end_s = parse_task_time_to_seconds(end_raw)
+        if end_s <= start_s:
+            raise ValueError(
+                f"{task_path}:{line_no}: end must be > start (start={start_s}, end={end_s})"
+            )
+        steps.append((start_s, end_s, raw_line))
+
+    if not steps:
+        raise ValueError(f"{task_path}: no STEP lines found")
+    return steps
+
+
+def format_task_time_anchor_seconds(s: float) -> str:
+    """Map non-negative seconds to HH.MM.SS.mmm (same style as task files)."""
+    s = max(0.0, float(s))
+    total_ms = int(round(s * 1000))
+    ms = total_ms % 1000
+    tsec = total_ms // 1000
+    sec = tsec % 60
+    tmin = tsec // 60
+    mm = tmin % 60
+    hh = tmin // 60
+    if hh > 99:
+        hh = hh % 100
+    return f"{hh:02d}.{mm:02d}.{sec:02d}.{ms:03d}"
+
+
+def build_remapped_task_text(task_path: Path, steps: list[tuple[float, float, str]]) -> str:
+    """
+    Copy task file with STEP= ranges re-timed to the concatenated output timeline.
+    Lines START=...,END=... (optional) are rewritten to span 0 -> total duration.
+    """
+    out_spans: list[tuple[float, float]] = []
+    cursor = 0.0
+    for start_s, end_s, _ in steps:
+        dur = end_s - start_s
+        out_spans.append((cursor, cursor + dur))
+        cursor += dur
+    total_duration_s = cursor
+
+    si = 0
+    out_chunks: list[str] = []
+    raw = task_path.read_text(encoding="utf-8")
+    for raw_line in raw.splitlines(keepends=True):
+        if raw_line.endswith("\r\n"):
+            nl, body = "\r\n", raw_line[:-2]
+        elif raw_line.endswith("\n"):
+            nl, body = "\n", raw_line[:-1]
+        elif raw_line.endswith("\r"):
+            nl, body = "\r", raw_line[:-1]
+        else:
+            nl, body = "", raw_line
+
+        s = body.strip()
+        if not s:
+            out_chunks.append(raw_line)
+            continue
+        if s.startswith("#"):
+            out_chunks.append(raw_line)
+            continue
+        upper = s.upper()
+        if (
+            s.startswith("@")
+            or upper.startswith("BLACK_SCREEN=")
+        ):
+            out_chunks.append(raw_line)
+            continue
+        if upper.startswith("START=") and ",END=" in upper:
+            out_chunks.append(
+                f"START={format_task_time_anchor_seconds(0.0)},"
+                f"END={format_task_time_anchor_seconds(total_duration_s)}{nl}"
+            )
+            continue
+        if upper.startswith("START=") or upper.startswith("END="):
+            out_chunks.append(raw_line)
+            continue
+        if not upper.startswith("STEP="):
+            out_chunks.append(raw_line)
+            continue
+
+        if si >= len(out_spans):
+            raise ValueError(f"{task_path}: extra STEP= line during remap (internal error)")
+        a, b = out_spans[si]
+        si += 1
+        rest = body[5:]
+        comma_idx = rest.find(",")
+        if comma_idx >= 0:
+            suffix = rest[comma_idx:]
+        else:
+            suffix = ""
+        out_chunks.append(
+            f"STEP={format_task_time_anchor_seconds(a)}->{format_task_time_anchor_seconds(b)}{suffix}{nl}"
+        )
+
+    if si != len(out_spans):
+        raise ValueError(f"{task_path}: STEP count mismatch during remap (internal error)")
+    return "".join(out_chunks)
 
 
 def ffmpeg_available(ffmpeg: str | None) -> str:
@@ -643,8 +801,26 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Cut a video segment by start/end time.")
     ap.add_argument("--input", "-i", required=True, help="Input video file.")
     ap.add_argument("--output", "-o", required=True, help="Output video file.")
-    ap.add_argument("--start", required=True, help='Start time (e.g. "00:01:23.45" or 83.45).')
-    ap.add_argument("--end", required=True, help='End time (e.g. "00:05:00" or 300).')
+    ap.add_argument("--start", required=False, help='Start time (e.g. "00:01:23.45" or 83.45).')
+    ap.add_argument("--end", required=False, help='End time (e.g. "00:05:00" or 300).')
+    ap.add_argument(
+        "--task",
+        required=False,
+        help=(
+            "Task file with STEP lines, e.g. "
+            'STEP=00.17.48.000->00.18.18.000,RUN_1.0,FADE_1 . '
+            "If set, cuts all STEP ranges and concatenates them into --output."
+        ),
+    )
+    ap.add_argument(
+        "--task-out",
+        default=None,
+        metavar="FILE",
+        help=(
+            "With --task: write a copy of the task file with STEP times re-anchored to the output "
+            "(concatenated) timeline. Default: <output_stem>_task.txt next to --output."
+        ),
+    )
     ap.add_argument(
         "--mode",
         choices=["reencode", "copy"],
@@ -663,6 +839,119 @@ def main() -> int:
     output_path = Path(args.output).expanduser()
     if not input_path.exists():
         print(f"Input not found: {input_path}", file=sys.stderr)
+        return 2
+
+    if args.task:
+        task_path = Path(args.task).expanduser().resolve()
+        if not task_path.exists():
+            print(f"Task file not found: {task_path}", file=sys.stderr)
+            return 2
+        try:
+            steps = parse_task_steps(task_path)
+        except (RuntimeError, ValueError) as e:
+            print(f"[error] {e}", file=sys.stderr)
+            return 2
+
+        ffmpeg_bin = ffmpeg_available(args.ffmpeg_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        script_path = Path(__file__).resolve()
+        with tempfile.TemporaryDirectory(prefix="cut_video_task_") as td:
+            tmp_dir = Path(td)
+            part_paths: list[Path] = []
+            for idx, (start_s, end_s, src_line) in enumerate(steps, start=1):
+                part_path = tmp_dir / f"part_{idx:04d}{output_path.suffix or '.mp4'}"
+                cmd = [
+                    sys.executable,
+                    str(script_path),
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(part_path),
+                    "--start",
+                    f"{start_s:.3f}",
+                    "--end",
+                    f"{end_s:.3f}",
+                    "--mode",
+                    args.mode,
+                ]
+                if args.ffmpeg_path:
+                    cmd += ["--ffmpeg-path", args.ffmpeg_path]
+                if args.force:
+                    cmd += ["--force"]
+                print(
+                    f"[task] STEP {idx}/{len(steps)}: {start_s:.3f}->{end_s:.3f} ({src_line.strip()})",
+                    file=sys.stderr,
+                )
+                p = subprocess.run(cmd, check=False)
+                if p.returncode != 0:
+                    print(f"[error] STEP {idx} failed with exit code {p.returncode}", file=sys.stderr)
+                    return p.returncode
+                part_paths.append(part_path)
+
+            concat_list = tmp_dir / "concat_list.txt"
+            concat_lines = []
+            for pp in part_paths:
+                escaped = pp.as_posix().replace("'", r"'\''")
+                concat_lines.append(f"file '{escaped}'\n")
+            concat_list.write_text("".join(concat_lines), encoding="utf-8")
+
+            concat_cmd = [
+                ffmpeg_bin,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "info",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_list),
+            ]
+            if args.mode == "copy":
+                concat_cmd += ["-c", "copy"]
+            else:
+                concat_cmd += [
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "20",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                ]
+            if output_path.suffix.lower() in {".mp4", ".mov", ".m4v"}:
+                concat_cmd += ["-movflags", "+faststart"]
+            concat_cmd += [str(output_path)]
+            print("Running:", " ".join(concat_cmd), file=sys.stderr)
+            p = subprocess.run(concat_cmd, check=False)
+            if p.returncode != 0:
+                return p.returncode
+            task_out = (
+                Path(args.task_out).expanduser().resolve()
+                if args.task_out
+                else output_path.expanduser().resolve().with_name(
+                    f"{output_path.resolve().stem}_task.txt"
+                )
+            )
+            task_out.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                remapped = build_remapped_task_text(task_path, steps)
+                task_out.write_text(remapped, encoding="utf-8")
+                print(f"[task] wrote remapped task: {task_out}", file=sys.stderr)
+            except OSError as e:
+                print(f"[error] could not write remapped task file: {e}", file=sys.stderr)
+                return 1
+            except ValueError as e:
+                print(f"[error] {e}", file=sys.stderr)
+                return 1
+            return 0
+
+    if not args.start or not args.end:
+        print("Either provide --task, or provide both --start and --end.", file=sys.stderr)
         return 2
 
     start_s = parse_time_to_seconds(args.start)
