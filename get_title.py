@@ -104,6 +104,7 @@ from dodnld import (
     DOWNLOAD_DIR,
     launch_browser,
     new_stealth_context,
+    page_wait_ms,
     wait_for_cloudflare_pass,
 )
 
@@ -130,7 +131,7 @@ def get_video_title(page_url: str) -> tuple[str | None, str | None, str, str | N
             page = context.new_page()
             page.goto(page_url, wait_until="domcontentloaded", timeout=PAGE_TIMEOUT_MS)
             wait_for_cloudflare_pass(page)
-            page.wait_for_timeout(2000)
+            page_wait_ms(page, 2000, intro="get_title: DOM settle after Cloudflare (2s):")
             title = page.evaluate(
                 """() => {
                 const og = document.querySelector('meta[property="og:title"]');
@@ -228,7 +229,7 @@ def collect_cast_list(page_url: str, *, headless: bool = True) -> list[tuple[str
                     print(f"[CAST] Page navigation error, stopping: {nav_err!r}", file=sys.stderr)
                     break
                 wait_for_cloudflare_pass(page)
-                page.wait_for_timeout(2000)
+                page_wait_ms(page, 2000, intro="collect_cast_list: DOM settle (2s):")
                 items = page.evaluate(
                     """() => {
                     const out = [];
@@ -379,7 +380,7 @@ def main() -> int:
         "-s",
         default=None,
         metavar="TABS",
-        help="Server tab priority (comma-separated): FST,VOE,TV,ST or single tab FST/VOE/TV/ST. Pass through to dodnld.py.",
+        help="Server tab priority (comma-separated): FST,VOE,TV,ST,DS or single tab. Pass through to dodnld.py.",
     )
     args = parser.parse_args()
     use_visual = args.visual and not getattr(args, "no_visual", False)

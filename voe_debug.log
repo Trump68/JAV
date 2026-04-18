@@ -1,0 +1,82 @@
+[08:23:33.920] visual_mode started
+[08:23:33.923] [TIMELINE] start
+[08:23:33.925] goto https://supjav.com/412797.html
+[08:23:33.927] [TIMELINE] goto_page
+[08:23:34.403] [TIMELINE] page_loaded
+[08:23:34.405] cloudflare_wait_start
+[08:23:34.452] cloudflare_wait_done
+[08:23:34.452] [TIMELINE] cloudflare_passed
+[08:23:36.162] REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://creative.bluetrafficstream.com/widgets/Spot/lib-auto.js?animate=1&autoclose=0&autoplay=all&campaignId=25ef0be23f1392956ed57f8d68dd13725b9c00d5ad0525a89f9438a18f57b969&campaignType=smartpop&cb=
+[08:23:36.284] REQUEST_FAILED (stream-related): net::ERR_ABORTED type=media url=https://cdn.storagexhd.com/files/video/9202-1-300x250.medium.mp4
+[08:23:36.459] video_code_from_title: ngod-169
+[08:23:36.467] [TIMELINE] remove_target_blank_done
+[08:23:36.609] REQUEST_FAILED (stream-related): net::ERR_ABORTED type=media url=https://cdn.storagexhd.com/files/video/9202-1-300x250.medium.mp4
+[08:23:36.978] server_tab_click_start (try: ['VOE', 'TV', 'FST', 'ST']) — only a.btn-server or SERVER block (avoid ad links)
+[08:23:36.986] server_tab_click_order: VOE-TV-FST-ST
+[08:23:36.996] btn-server_dump: [{'text': 'TV', 'href': 'javascript:;', 'visible': True, 'classes': 'btn-server active', 'onclick': False}, {'text': 'FST', 'href': 'javascript:;', 'visible': True, 'classes': 'btn-server', 'onclick': False}, {'text': 'ST', 'href': 'javascript:;', 'visible': True, 'classes': 'btn-server', 'onclick': False}, {'text': 'VOE', 'href': 'javascript:;', 'visible': True, 'classes': 'btn-server', 'onclick': False}]
+[08:23:36.998] server_tab_click_order (after omit missing VOE): VOE-TV-FST-ST
+[08:23:37.001] page_url_before_tab_click: https://supjav.com/412797.html
+[08:23:37.046] REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/146631205/master/146631205_160p.m3u8
+[08:23:37.048] REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/117759711/master/117759711_160p.m3u8
+[08:23:37.050] REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/222340552/master/222340552_160p.m3u8
+[08:23:38.002] REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://media-hls.growcdnssedge.com/b-hls-07/171219977/171219977.m3u8
+[08:23:39.892] server_tab_click_button: VOE
+[08:23:39.900] mark_tab_js result for VOE: found=True
+[08:23:39.907] marked_element_info: {'tag': 'A', 'text': 'VOE', 'href': 'javascript:;', 'visible': True, 'rect': {'x': 221, 'y': 348, 'w': 42, 'h': 23}, 'classList': 'btn-server'}
+[08:23:40.061] playwright_click_success: VOE
+[08:23:40.063] server_tab_click_success: VOE
+[08:23:40.067] page_url_after_click: https://supjav.com/412797.html
+[08:23:40.477] [TIMELINE] server_tab_clicked_VOE
+[08:23:40.490] server_tab_clicked: VOE
+[08:23:40.493] Waiting 10s for VOE iframe to load (supremejav)...
+[08:23:50.510] voe_frame_dump (6 frames): ['MAIN:https://supjav.com/412797.html', 'sub:https://creative.mavrtracktor.com/widgets/v4/Universal?autoplay=all&autoplayForce=1&campaignId=a2a255c35b3cf8c7d1ad038e9dddfd9f3aa9cdaaa7ab7badbcf293f', 'sub:https://creative.bluetrafficstream.com/widgets/v4/Universal?autoplay=all&autoplayForce=1&campaignId=6b01a82eb1bb572b93099708a669913cdf70a1a22ec7fe74e7', 'sub:https://a.eix304.com/ad?spotid=60b74e5161d6e2527c1401d3&type=300x250&output=html&extra1=0&ref=https%3A%2F%2Fsupjav.com%2F412797.html&dt=1776489814754&', 'sub:https://r.trackwilltrk.com/s1/24e4507c-a0de-4424-93c5-7c4eb97f6a1e?externalId=a98bec55-5421-48c5-9b21-3fffe5ce3507&cv1=a98bec55-5421-48c5-9b21-3fffe5c', 'sub:https://cdn.storagexhd.com/files/20152/300x250.html?targetUrl=https%3A%2F%2Fr.trackwilltrk.com%2Fc1%2F3490a4cc-396e-48ec-9708-399e5f5aa3ec%3Fcv1%3Da98']
+[08:23:50.534] voe_iframe_dom_dump: [{'src': 'https://go.mavrtracktor.com/smartpop/a2a255c35b3cf8c7d1ad038e9dddfd9f3aa9cdaaa7ab7badbcf293fd3b12a986?userId=4a5644e20df', 'visible': True, 'w': 728, 'h': 90, 'style_display': 'block', 'parent_display': ''}, {'src': 'https://a.eix304.com/ad?spotid=60b74e5161d6e2527c1401d3&type=300x250&output=html&extra1=0&ref=https%3A%2F%2Fsupjav.com%2', 'visible': True, 'w': 300, 'h': 250, 'style_display': '', 'parent_display': ''}, {'src': 'https://go.mnaspm.com/smartpop/6b01a82eb1bb572b93099708a669913cdf70a1a22ec7fe74e7e5e8db7901b627?userId=4cba4decde8c94041', 'visible': True, 'w': 300, 'h': 454, 'style_display': 'inline-block', 'parent_display': ''}]
+[08:23:50.682] voe_iframe_loaded_initial: False
+[08:23:50.684] request_failures_so_far (7): ['REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://creative.bluetrafficstream.com/widgets/Spot/lib-auto.js?animate=1&autoclose=0&autoplay=all&campaignId=25ef0be23f1392956ed57f8d68dd13725b9c00d5ad0525a89f9438a18f57b969&campaignType=smartpop&cb=', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=media url=https://cdn.storagexhd.com/files/video/9202-1-300x250.medium.mp4', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=media url=https://cdn.storagexhd.com/files/video/9202-1-300x250.medium.mp4', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/146631205/master/146631205_160p.m3u8', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/117759711/master/117759711_160p.m3u8', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/222340552/master/222340552_160p.m3u8', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://media-hls.growcdnssedge.com/b-hls-07/171219977/171219977.m3u8']
+[08:23:50.685] VOE iframe not loaded after click, retrying with ad dismissal...
+[08:23:50.686] VOE retry 1/5 — dismiss overlays, click VOE
+[08:23:52.253] VOE retry 1: mark_found=True
+[08:23:52.389] VOE retry 1: playwright_click OK
+[08:23:52.391] VOE retry 1: waiting 10s for iframe...
+[08:24:02.396] VOE retry 1: sub_frames=['https://creative.mavrtracktor.com/widgets/v4/Universal?autoplay=all&autoplayForce=1&campaignId=a2a25', 'https://creative.bluetrafficstream.com/widgets/v4/Universal?autoplay=all&autoplayForce=1&campaignId=', 'https://a.eix304.com/ad?spotid=60b74e5161d6e2527c1401d3&type=300x250&output=html&extra1=0&ref=https%', 'https://r.trackwilltrk.com/s1/24e4507c-a0de-4424-93c5-7c4eb97f6a1e?externalId=a98bec55-5421-48c5-9b2', 'https://cdn.storagexhd.com/files/20152/300x250.html?targetUrl=https%3A%2F%2Fr.trackwilltrk.com%2Fc1%']
+[08:24:02.456] VOE retry 1: native_click attempt
+[08:24:12.661] VOE retry 1: native_click — iframe still not loaded
+[08:24:12.662] VOE retry 2/5 — dismiss overlays, click VOE
+[08:24:14.235] VOE retry 2: mark_found=True
+[08:24:14.267] VOE retry 2: playwright_click OK
+[08:24:14.269] VOE retry 2: waiting 10s for iframe...
+[08:24:16.265] CONSOLE_ERROR: Failed to load resource: net::ERR_FAILED
+[08:24:24.279] VOE retry 2: sub_frames=['https://creative.mavrtracktor.com/widgets/v4/Universal?autoplay=all&autoplayForce=1&campaignId=a2a25', 'https://creative.bluetrafficstream.com/widgets/v4/Universal?autoplay=all&autoplayForce=1&campaignId=', 'https://a.eix304.com/ad?spotid=60b74e5161d6e2527c1401d3&type=300x250&output=html&extra1=0&ref=https%', 'https://r.trackwilltrk.com/s1/24e4507c-a0de-4424-93c5-7c4eb97f6a1e?externalId=a98bec55-5421-48c5-9b2', 'https://cdn.storagexhd.com/files/20152/300x250.html?targetUrl=https%3A%2F%2Fr.trackwilltrk.com%2Fc1%', 'https://lk1.supremejav.com/supjav.php?l=2d84ba2d662a7aa63bf77b628a897b34622d7084ea61a3d2a58a76b4d1f6', 'https://marissasharecareer.com/e/rwu4ubxxghdj', 'about:blank', 'about:blank']
+[08:24:24.460] VOE iframe loaded after retry 2
+[08:24:24.462] VOE confirmed: ad_stream_ids_blocklist={'171219977'}
+[08:24:24.562] VOE final frame_dump: ['MAIN:https://supjav.com/412797.html', 'sub:https://creative.mavrtracktor.com/widgets/v4/Universal?autoplay=all&autoplayForce=1&campaignId=a2a255c35b3cf8c7d1ad038e9', 'sub:https://creative.bluetrafficstream.com/widgets/v4/Universal?autoplay=all&autoplayForce=1&campaignId=6b01a82eb1bb572b9309', 'sub:https://a.eix304.com/ad?spotid=60b74e5161d6e2527c1401d3&type=300x250&output=html&extra1=0&ref=https%3A%2F%2Fsupjav.com%2', 'sub:https://r.trackwilltrk.com/s1/24e4507c-a0de-4424-93c5-7c4eb97f6a1e?externalId=a98bec55-5421-48c5-9b21-3fffe5ce3507&cv1=a', 'sub:https://cdn.storagexhd.com/files/20152/300x250.html?targetUrl=https%3A%2F%2Fr.trackwilltrk.com%2Fc1%2F3490a4cc-396e-48ec', 'sub:https://lk1.supremejav.com/supjav.php?l=2d84ba2d662a7aa63bf77b628a897b34622d7084ea61a3d2a58a76b4d1f6394113f850dfce7c16dd', 'sub:https://marissasharecareer.com/e/rwu4ubxxghdj', 'sub:about:blank', 'sub:about:blank']
+[08:24:24.564] request_failures_after_voe_retry (7): ['REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://creative.bluetrafficstream.com/widgets/Spot/lib-auto.js?animate=1&autoclose=0&autoplay=all&campaignId=25ef0be23f1392956ed57f8d68dd13725b9c00d5ad0525a89f9438a18f57b969&campaignType=smartpop&cb=', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=media url=https://cdn.storagexhd.com/files/video/9202-1-300x250.medium.mp4', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=media url=https://cdn.storagexhd.com/files/video/9202-1-300x250.medium.mp4', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/146631205/master/146631205_160p.m3u8', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/117759711/master/117759711_160p.m3u8', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/222340552/master/222340552_160p.m3u8', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://media-hls.growcdnssedge.com/b-hls-07/171219977/171219977.m3u8']
+[08:24:24.565] console_errors_after_voe_retry (1): ['Failed to load resource: net::ERR_FAILED']
+[08:24:24.571] saved_player_box: {'x': 47.333335876464844, 'y': 84.66667175292969, 'w': 777, 'h': 550, 'src': 'https://lk1.supremejav.com/supjav.php?l=2d84ba2d662a7aa63bf77b628a897b34622d7084'}
+[08:24:26.142] [TIMELINE] dismiss_ad_overlays_done
+[08:24:26.881] [TIMELINE] download_button_injected_initial
+[08:24:27.747] ALL request_failures (7): ['REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://creative.bluetrafficstream.com/widgets/Spot/lib-auto.js?animate=1&autoclose=0&autoplay=all&campaignId=25ef0be23f1392956ed57f8d68dd13725b9c00d5ad0525a89f9438a18f57b969&campaignType=smartpop&cb=', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=media url=https://cdn.storagexhd.com/files/video/9202-1-300x250.medium.mp4', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=media url=https://cdn.storagexhd.com/files/video/9202-1-300x250.medium.mp4', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/146631205/master/146631205_160p.m3u8', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/117759711/master/117759711_160p.m3u8', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://edge-hls.growcdnssedge.com/hls/222340552/master/222340552_160p.m3u8', 'REQUEST_FAILED (stream-related): net::ERR_ABORTED type=fetch url=https://media-hls.growcdnssedge.com/b-hls-07/171219977/171219977.m3u8']
+[08:24:27.760] ALL console_errors (1): ['Failed to load resource: net::ERR_FAILED']
+[08:24:27.762] Ready. Click Download when stream is visible; click again to stop download.
+[08:24:29.768] Tab wall: 120s for VOE (then next server tab or stop if none).
+[08:24:29.833] loop_iter: on_player_page=True target_stream=False stream_url=False server_tab=VOE voe_done=False low_q=False
+[08:24:29.834] auto_click_player: VOE — scroll up then 2-click pattern until stream appears (timeout ~20s)
+[08:24:30.738] auto_click_player: VOE direct click at (436, 681) iframe 777x550
+[08:24:31.054] [TIMELINE] stream_captured_m3u8
+[08:24:31.055] [TIMELINE] TARGET_STREAM_APPEARED: https://marissasharecareer.com/engine/jwplayer/jwplayer6/c4585c1c9c1a4486eb650df09e3a4657.gif?h=-950723323&e=pa&n=2013517235521662&aid=SDtULpKyEeWwxnBWgb9%2BiQ&amp=0&at=1&c=-1&ccp=0&cp=0&d=0&eb=0&ed=6&emi=1g80pl51yoxn&i=1&lid=sqge0hh1utl6&lsa=read&mt=0&pbd=1&pbr=1&pgi=w03lqohizgsm&ph=3&pid=rwu4ubxxghdj&pii=0&pl=550&plc=1&pli=nufqrvj9e53l&pp=hlsjs&prc=1&ps=3&pss=1&pt=Watch%20supjav.com%40ngod-169-ub.mp4%20-%20VOE%20%7C%20Content%20Delivery%20Network%20(CDN)%20%26%20Video%20Cloud&pu=https%3A%2F%2Fvoe.sx%2F&pv=8.40.2&pyc=0&s=1&sdk=0&stc=1&stpe=0&t=supjav.com%40ngod-169-ub.mp4&tv=4.0.9&vb=1&vi=0.59&vl=90&wd=777&ab=0&bwe=7467&cme=0&flc=0&lng=en&mu=https%3A%2F%2Fugc-cdn-caching-n3eng2ga42g9qnecxk.cloudwindow-route.com%2Fengine%2Fhls2%2F01%2F16726%2Frwu4ubxxghdj_%2Cn%2C.urlset%2Fmaster.m3u8%3Ft%3DJWIz5Td92eWKMQsjHE8KpC5SBLa5LPHO4SNOJDSbdY0%26s%3D1776489855%26e%3D14400%26f%3D83633343%26node%3D9v%2B%2FqtT3cMM8dv3V8YaT6If0xNxtuaLSKFVnN9qRhsg%3D%26i%3D89.125%26sp%3D2500%26asn%3D1%26q%3Dn%26rq%3DzVHPR4aU2BM80iZ205mdLrW1l19AqMsCpESZm63R&pd=1&plng=en&pni=0&pr=4&tb=0&vd=0&sa=1776489870823
+[08:24:31.057] Target stream link appeared.
+[08:24:31.162] [TIMELINE] stream_captured_m3u8
+[08:24:31.262] [TIMELINE] stream_captured_m3u8
+[08:24:31.276] auto_click_player: VOE — stream appeared after attempt 1: https://ugc-cdn-caching-n3eng2ga42g9qnecxk.cloudwindow-route.com/engine/hls2/01/16726/rwu4ubxxghdj_,n,.urlset/index-v1-a
+[08:24:33.280] Auto-download: target link appeared, starting.
+[08:24:33.295] Stream URL saved to last_download_url.txt
+[08:24:33.339] Auto-download started. You can close the browser; download will continue.
+[08:24:33.431] Waiting for download to start before closing browser...
+[08:24:38.252] Download confirmed, closing browser.
+[08:24:38.272] [TIMELINE] stream_captured_m3u8
+[08:24:38.274] [TIMELINE] TARGET_STREAM_APPEARED: https://marissasharecareer.com/engine/jwplayer/jwplayer6/c4585c1c9c1a4486eb650df09e3a4657.gif?h=-129860916&e=s&n=3869458379339296&aid=SDtULpKyEeWwxnBWgb9%2BiQ&amp=0&at=1&c=-1&ccp=0&cp=0&d=0&eb=0&ed=6&emi=1g80pl51yoxn&i=1&lid=sqge0hh1utl6&lsa=read&mt=0&pbd=1&pbr=1&pgi=w03lqohizgsm&ph=3&pid=rwu4ubxxghdj&pii=0&pl=550&plc=1&pli=nufqrvj9e53l&pp=hlsjs&ppm=VOD&prc=1&ps=3&pss=1&pt=Watch%20supjav.com%40ngod-169-ub.mp4%20-%20VOE%20%7C%20Content%20Delivery%20Network%20(CDN)%20%26%20Video%20Cloud&pu=https%3A%2F%2Fvoe.sx%2F&pv=8.40.2&pyc=1&s=1&sdk=0&stc=1&stpe=0&t=supjav.com%40ngod-169-ub.mp4&tv=4.0.9&vb=1&vi=0.59&vl=90&wd=777&abm=1&bwe=11576&cae=0&cct=0&ch=2&cdid=a&drm=0&ff=1240&fsm=0&l=4&lng=en&mk=hls&mu=https%3A%2F%2Fugc-cdn-caching-n3eng2ga42g9qnecxk.cloudwindow-route.com%2Fengine%2Fhls2%2F01%2F16726%2Frwu4ubxxghdj_%2Cn%2C.urlset%2Fmaster.m3u8%3Ft%3DJWIz5Td92eWKMQsjHE8KpC5SBLa5LPHO4SNOJDSbdY0%26s%3D1776489855%26e%3D14400%26f%3D83633343%26node%3D9v%2B%2FqtT3cMM8dv3V8YaT6If0xNxtuaLSKFVnN9qRhsg%3D%26i%3D89.125%26sp%3D2500%26asn%3D1%26q%3Dn%26rq%3DzVHPR4aU2BM80iZ205[08:51:10.942] Download finished.
+lng=en&pni=0&pr=4&q=32&qcr=initial%20choice&sbr=1527&sp=0&strt=1290&tb=12&tt=1&vd=7028&vh=720&vs=0&vw=1280&sa=1776489872108
+[08:24:38.276] Target stream link appeared.
+[08:24:38.641] Browser closed. Waiting for download to finish...
+[08:34:08.620] Done.
+[08:34:08.622] Download finished.
