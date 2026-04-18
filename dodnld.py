@@ -1511,7 +1511,7 @@ CLOUDFLARE_WAIT_MS = 12_500  # wait for Cloudflare "Verifying you are human" to 
 # Visual mode: max wall-clock wait on FST for a *downloadable* stream before fallback / stop.
 FST_TAB_MAX_WAIT_S = 120.0
 # Visual mode: max wall time for Streamtape embed click loop (get_video / direct URL).
-ST_STREAMTAPE_RESOLVE_MAX_S = 80.0
+ST_STREAMTAPE_RESOLVE_MAX_S = 45.0
 
 
 def wait_for_cloudflare_pass(page, timeout_ms: int = CLOUDFLARE_WAIT_MS) -> None:
@@ -1940,6 +1940,10 @@ def _is_downloadable_stream_url(url: str | None) -> bool:
         return True
     if "edgeon-bandwidth" in lower or "urlset" in lower:
         return True
+    # DoodStream / playmogo embed URLs — yt-dlp handles these natively
+    _dood_hosts = ("dood.", "d0000d.com", "d0011d.com", "ds2play.com", "ds2cd.com", "playmogo.com")
+    if any(h in lower for h in _dood_hosts) and ("/e/" in lower or "/d/" in lower):
+        return True
     return False
 
 
@@ -1987,6 +1991,7 @@ def _find_supjav_player_iframe_pair(page: Any, tab: str):
             "iframe[src*='d0000d']",
             "iframe[src*='ds2cd']",
             "iframe[src*='ds2play']",
+            "iframe[src*='playmogo']",
             "iframe[src*='doodstream']",
             "iframe[src*='supremejav']",
         ):
@@ -2013,6 +2018,7 @@ def _find_supjav_player_iframe_pair(page: Any, tab: str):
                         "d0000d",
                         "ds2cd",
                         "ds2play",
+                        "playmogo",
                     )
                 ) or "supremejav" in furl:
                     try:
@@ -2035,17 +2041,22 @@ def _page_has_turnstile(page: Any) -> bool:
                 return True
     except Exception:
         pass
+    # Check iframe src attributes in every frame (Turnstile iframe may be nested inside playmogo)
     try:
-        result = page.evaluate("""() => {
-            var all = document.querySelectorAll('iframe');
-            for (var i = 0; i < all.length; i++) {
-                var src = (all[i].src || all[i].getAttribute('src') || '').toLowerCase();
-                if (src.indexOf('challenges.cloudflare.com/turnstile') >= 0) return true;
-            }
-            return false;
-        }""")
-        if result:
-            return True
+        for frame in page.frames:
+            try:
+                result = frame.evaluate("""() => {
+                    var all = document.querySelectorAll('iframe');
+                    for (var i = 0; i < all.length; i++) {
+                        var src = (all[i].src || all[i].getAttribute('src') || '').toLowerCase();
+                        if (src.indexOf('challenges.cloudflare.com/turnstile') >= 0) return true;
+                    }
+                    return false;
+                }""")
+                if result:
+                    return True
+            except Exception:
+                pass
     except Exception:
         pass
     return False
@@ -2178,6 +2189,16 @@ def _run_supjav_embed_resolve_click_loop(
             emit(ok_msg)
             auto_download_pending_ref[0] = True
             break
+        # DS: log which player frame is active (actual m3u8 captured via on_response request.frame)
+        if tab == "DS" and not cur_url and attempt == 1:
+            try:
+                for _f in page.frames:
+                    _fu = _f.url or ""
+                    if _fu and any(d in _fu.lower() for d in ("playmogo", "dood.", "supremejav", "doodstream")):
+                        emit(f"DoodStream: player frame detected ({_fu[:80]})")
+                        break
+            except Exception:
+                pass
         try:
             # DS: check for Cloudflare Turnstile — try to resolve before giving up
             if tab != "ST" and attempt >= 2 and _page_has_turnstile(page):
@@ -2224,6 +2245,7 @@ def _run_supjav_embed_resolve_click_loop(
                         "iframe[src*='d0000d']",
                         "iframe[src*='ds2cd']",
                         "iframe[src*='ds2play']",
+                        "iframe[src*='playmogo']",
                         "iframe[src*='doodstream']",
                         "iframe[src*='supremejav']",
                         "iframe",
@@ -2729,6 +2751,24 @@ def run_visual_mode(
                     ".m3u8" in lower or ".mp4" in lower or is_media or _is_fst_hls_txt_playlist_url(url)
                 )
                 if not url_not_skipped(url) and not is_fst_media_candidate:
+                    # DS: capture m3u8 from growcdnssedge CDN when request comes from DS player frame
+                    if (
+                        server_tab == "DS"
+                        and "growcdnssedge" in lower
+                        and ".m3u8" in lower
+                        and "_HLS_msn" not in lower
+                        and "_HLS_part" not in lower
+                    ):
+                        try:
+                            req_frame_url = (response.request.frame.url or "").lower()
+                            _ds_frame_inds = ("playmogo", "dood.", "supremejav", "doodstream", "ds2play", "ds2cd")
+                            if any(d in req_frame_url for d in _ds_frame_inds):
+                                if not stream_url_for_download[0] or not _is_downloadable_stream_url(stream_url_for_download[0]):
+                                    _set_stream_url(url, response)
+                                    timeline("stream_captured_ds_cdn_master")
+                                    auto_download_pending_ref[0] = True
+                        except Exception:
+                            pass
                     _tab_log(f"skip by url_not_skipped: {url[:160]}")
                     return
                 is_st_tv_m3u8 = server_tab in ("ST", "TV", "FST", "DS") and ".m3u8" in lower
