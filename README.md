@@ -43,7 +43,7 @@ Python scripts that open Supjav video pages, load the player (by switching serve
 | `--output FILE` | `-o` | Путь выходного файла (по умолчанию `video.m4v`) |
 | `--visual` | `-v` | Визуальный режим с окном браузера |
 | `--no-auto-download` | | Не начинать скачивание автоматически (только с `--visual`) |
-| `--server-tab TAB` | `-s` | Вкладка сервера: `VOE` (по умолчанию, пробует VOE → TV → ST), `ST`, `TV`, `FST` |
+| `--server-tab TAB` | `-s` | Вкладка сервера: `VOE`, `ST`, `TV`, `FST` или список через запятую. В визуальном режиме без `-s` используется общий порядок fallback; явное `-s VOE` запускает только VOE |
 | `--progress-slug SLUG` | | Префикс в **консоли** при закачке (`-d` и визуальный режим): **`SLUG: CODE (TAB)`**, затем полоса; на всех вкладках вкладка берётся из `-s` / активной вкладки и уточняется по URL (VOE/ST); `get_title --process-list` задаёт `SLUG` и `CODE` |
 | `--progress-code CODE` | | Код фильма в префиксе; если не задан — из заголовка страницы |
 | `--progress-tab TAB` | | Вкладка в скобках; если не задано — первый `-s` или `VOE`, для части URL подменяется на ST/VOE |
@@ -89,7 +89,7 @@ python dodnld.py "https://supjav.com/411204.html" -v -s TV
 python dodnld.py "https://supjav.com/411204.html" -v --server-tab FST
 ```
 
-При VOE — автоматически пробует VOE → TV → ST при неудаче. При указании ST или TV — если скачивание падает, переключается на ST как fallback.
+В визуальном режиме без `-s` используется fallback-порядок FST → VOE → TV → ST. Явное `-s VOE` / `-s ST` / `-s TV` / `-s FST` запускает только выбранную вкладку.
 
 В **визуальном** режиме на вкладке **FST** ожидание **скачиваемого** URL потока ограничено **120 секундами**: после таймаута — переход на **ST** (если не режим «одна вкладка» и не `--skip-st`) или остановка.
 
@@ -263,3 +263,9 @@ STEP=00.29.00.000->00.29.08.000,RUN_1.0,FADE_1
 python c:/projects/JAV/cut_video.py -i "c:\Projects\JAV\download\hayashi-yuna\IENE-531 UNC [2024.02.29]\IENE-531_UNCENSORED.m4v" -o "highlights.m4v" --task "c:\Projects\JAV\download\hayashi-yuna\IENE-531 UNC [2024.02.29]\scenes.txt" --mode copy
 
 python c:/projects/JAV/cut_video.py -i "c:\Projects\JAV\download\usui-saryuu\split_YMN-005 UNC [2024.08.04]\YMN-005_UNCENSORED.m4v" -o "fragment.m4v" --start "01:02:50" --end "01:29:28" --mode copy
+
+python get_title.py -s VOE,TV,FST,ST --sync-cast-folders hayashi-yuna,aida-nana,kizaki-jessica,ozawa-naho,komatsu-azu,ogawa-asami,aida-yua,konishi-yuu,usui-saryuu
+
+python delete.py -s ADN-000 --db c:\\Projects\JAV\downloads.db
+
+python dodnld.py --repair-video "C:\path\to\video.m4v"

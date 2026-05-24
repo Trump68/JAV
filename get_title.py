@@ -13,6 +13,12 @@ Utility for Supjav:
 3) Process-list mode (--process-list CAST_SLUG): read download/{CAST_SLUG}/LIST.TXT
    and for each line whose labels contain 'Reducing Mosaic' or 'Uncensored Leak',
    call dodnld.py to download into download/{CAST_SLUG}/{CODE} UNC/LKD [date]/...
+
+4) Sync cast folders (--sync-cast-folders SLUG [SLUG …]): runs forever in rounds —
+   only the listed cast slugs (comma allowed in one token, e.g. hayashi-yuna,aida-nana);
+   each cycle for each slug: python -u get_title.py --cast-list … then --process-list …;
+   pause between rounds (Ctrl+C to stop). Forwards --no-visual, -s/--server-tab,
+   --skip-st, --redownload, --censored. Optional --sync-cycle-sleep SEC.
 """
 
 import argparse
@@ -21,6 +27,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import time
 import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
@@ -111,6 +118,23 @@ from dodnld import (
 PAGE_TIMEOUT_MS = 60_000
 # JAV code pattern: 2–5 letters, hyphen, digits (e.g. IPZ-590, IPZZ-621, ABP-123)
 CODE_PATTERN = re.compile(r"[A-Z]{2,5}-\d+", re.IGNORECASE)
+def _parse_explicit_sync_cast_slugs(argv_tokens: list[str]) -> list[str]:
+    """Split comma-separated tokens; strip; dedupe preserving order; reject path-like segments."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for tok in argv_tokens:
+        for part in tok.split(","):
+            s = part.strip()
+            if not s:
+                continue
+            if "/" in s or "\\" in s or s.startswith(".") or ".." in s:
+                print(f"[SYNC-CASTS] Ignoring invalid slug token: {part!r}", file=sys.stderr)
+                continue
+            if s in seen:
+                continue
+            seen.add(s)
+            out.append(s)
+    return out
 
 
 def extract_code_from_title(title: str) -> str | None:
@@ -347,6 +371,26 @@ def main() -> int:
         help="Process download/{CAST_SLUG}/LIST.TXT: each 'Reducing Mosaic' (… UNC …, _UNCENSORED.m4v) or 'Uncensored Leak' (… LKD …, _LEAKED.m4v); --censored: empty labels.",
     )
     parser.add_argument(
+        "--sync-cast-folders",
+        nargs="+",
+        metavar="SLUG",
+        default=None,
+        dest="sync_cast_folder_slugs",
+        help=(
+            "Repeat forever for explicit cast slugs only (supjav /category/cast/…); "
+            "comma in one token is OK, e.g. --sync-cast-folders hayashi-yuna,aida-nana. "
+            "Each round: --cast-list URL then --process-list per slug; "
+            "--sync-cycle-sleep between rounds; Ctrl+C to stop."
+        ),
+    )
+    parser.add_argument(
+        "--sync-cycle-sleep",
+        type=float,
+        default=10.0,
+        metavar="SEC",
+        help="With --sync-cast-folders: seconds to wait after each full pass (default: 10). Use 0 for no pause.",
+    )
+    parser.add_argument(
         "--visual",
         "-v",
         action="store_true",
@@ -380,10 +424,86 @@ def main() -> int:
         "-s",
         default=None,
         metavar="TABS",
-        help="Server tab priority (comma-separated): FST,VOE,TV,ST,DS or single tab. Pass through to dodnld.py.",
+        help="Server tab priority (comma-separated): FST,VOE,TV,ST,DS or single tab. Pass through to dodnld.py (comma list = strict order).",
     )
     args = parser.parse_args()
     use_visual = args.visual and not getattr(args, "no_visual", False)
+    script_dir = Path(__file__).resolve().parent
+
+    if args.sync_cast_folder_slugs is not None:
+        if args.cast_list:
+            print("--sync-cast-folders cannot be used together with --cast-list.", file=sys.stderr)
+            return 1
+        if args.process_list:
+            print("--sync-cast-folders cannot be used together with --process-list.", file=sys.stderr)
+            return 1
+        if not DOWNLOAD_DIR.is_dir():
+            print(f"Download directory not found: {DOWNLOAD_DIR}", file=sys.stderr)
+            return 1
+        get_title_py = script_dir / "get_title.py"
+        if not get_title_py.exists():
+            print(f"[SYNC-CASTS] Missing script: {get_title_py}", file=sys.stderr)
+            return 1
+        slugs = _parse_explicit_sync_cast_slugs(list(args.sync_cast_folder_slugs))
+        if not slugs:
+            print(
+                "[SYNC-CASTS] No valid cast slugs after parsing (use e.g. "
+                "--sync-cast-folders hayashi-yuna,aida-nana).",
+                file=sys.stderr,
+            )
+            return 1
+        cycle_sleep = max(0.0, float(getattr(args, "sync_cycle_sleep", 10.0)))
+        cycle = 0
+        try:
+            while True:
+                cycle += 1
+                print(
+                    f"[SYNC-CASTS] cycle {cycle}: {len(slugs)} slug(s) — {', '.join(slugs)}",
+                    file=sys.stderr,
+                )
+                overall = 0
+                for slug in slugs:
+                    cast_url = f"https://supjav.com/category/cast/{slug}"
+                    print(f"[SYNC-CASTS] === {slug} ===", file=sys.stderr)
+                    cmd_cast = [sys.executable, "-u", str(get_title_py), "--cast-list", cast_url]
+                    cmd_proc = [sys.executable, str(get_title_py), "--process-list", slug]
+                    for cmd in (cmd_cast, cmd_proc):
+                        if not use_visual:
+                            cmd.append("--no-visual")
+                        if getattr(args, "skip_st", False):
+                            cmd.append("--skip-st")
+                        if getattr(args, "server_tab", None):
+                            cmd.extend(["-s", args.server_tab])
+                    if getattr(args, "redownload", False):
+                        cmd_proc.append("--redownload")
+                    if getattr(args, "censored", False):
+                        cmd_proc.append("--censored")
+                    r1 = subprocess.run(cmd_cast, cwd=str(script_dir))
+                    if r1.returncode != 0:
+                        print(
+                            f"[SYNC-CASTS] --cast-list failed for {slug} (exit {r1.returncode}), skipping --process-list.",
+                            file=sys.stderr,
+                        )
+                        overall = overall or r1.returncode
+                        continue
+                    r2 = subprocess.run(cmd_proc, cwd=str(script_dir))
+                    if r2.returncode != 0:
+                        print(
+                            f"[SYNC-CASTS] --process-list failed for {slug} (exit {r2.returncode}).",
+                            file=sys.stderr,
+                        )
+                        overall = overall or r2.returncode
+                if overall != 0:
+                    print(f"[SYNC-CASTS] cycle {cycle} finished with at least one non-zero exit code.", file=sys.stderr)
+                if cycle_sleep > 0:
+                    print(
+                        f"[SYNC-CASTS] cycle {cycle} complete; sleeping {cycle_sleep:.1f}s before next round (Ctrl+C to stop).",
+                        file=sys.stderr,
+                    )
+                    time.sleep(cycle_sleep)
+        except KeyboardInterrupt:
+            print("[SYNC-CASTS] Stopped by user (KeyboardInterrupt).", file=sys.stderr)
+            return 0
 
     if args.process_list:
         # Process-list mode: run downloads for entries in LIST.TXT under given actress slug
@@ -400,7 +520,6 @@ def main() -> int:
         if not lines:
             print(f"LIST.TXT is empty: {list_path}", file=sys.stderr)
             return 1
-        script_dir = Path(__file__).resolve().parent
         dodnld_py = script_dir / "dodnld.py"
         db_path = _db_path()
         conn = sqlite3.connect(str(db_path))
@@ -530,7 +649,6 @@ def main() -> int:
     code = code or "unknown"
     is_reducing_mosaic = "reducing mosaic" in (title or "").lower()
     output_name = f"{code}_UNCENSORED.m4v" if is_reducing_mosaic else f"{code}.m4v"
-    script_dir = Path(__file__).resolve().parent
     dodnld_py = script_dir / "dodnld.py"
     # Save video to download/{CODE}/{filename}; wait for dodnld to finish
     output_path_arg = f"{code}/{output_name}"

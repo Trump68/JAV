@@ -1,0 +1,6 @@
+2026-05-24 20:18:07.675	=== SESSION_START url='https://supjav.com/425338.html' server_tab='VOE' auto_download=True ===
+2026-05-24 20:18:13.431	_maybe_adjust_tab_list_for_ds: page_url='https://supjav.com/425338.html' raw_in=['VOE'] out=['VOE'] ds_visible=False only_ds=False user_picked_single_tab=True explicit_comma_order=False
+2026-05-24 20:18:13.435	server_tab_phase_start: page_url='https://supjav.com/425338.html' tab_list=['VOE'] tabs_to_try=['VOE'] user_picked_single_tab=True skip_st=False
+2026-05-24 20:19:25.110	=== SESSION_START url='https://supjav.com/425338.html' server_tab='VOE,TV,FST,ST' auto_download=True ===
+2026-05-24 20:19:31.023	_maybe_adjust_tab_list_for_ds: page_url='https://supjav.com/425338.html' raw_in=['VOE', 'TV', 'FST', 'ST'] out=['VOE', 'TV', 'FST', 'ST'] ds_visible=False only_ds=False user_picked_single_tab=False explicit_comma_order=True
+2026-05-24 20:19:31.028	server_tab_phase_start: page_url='https://supjav.com/425338.html' tab_list=['VOE', 'TV', 'FST', 'ST'] tabs_to_try=['VOE', 'TV', 'FST', 'ST'] user_picked_single_tab=False skip_st=False
